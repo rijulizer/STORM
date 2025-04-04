@@ -97,7 +97,7 @@ def train_world_model_step(
     demonstration_batch_size,
     batch_length: int,
     logger,
-):
+    ):
     """
     Train single step of the world model with the sampled data from replay buffer
     """
@@ -120,7 +120,7 @@ def world_model_imagine_data(
     imagine_batch_length,
     log_video,
     logger,
-):
+    ):
     """
     Sample context from replay buffer, then imagine data with world model and agent
     """

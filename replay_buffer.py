@@ -13,7 +13,7 @@ class ReplayBuffer:
         max_length=int(1e6),
         warmup_length=1024,
         store_on_gpu=False,
-    ) -> None:
+        ) -> None:
 
         self.store_on_gpu = store_on_gpu
         if store_on_gpu:
