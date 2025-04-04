@@ -72,7 +72,74 @@ class PositionalEncoding1D(nn.Module):
         # Get the position embedding at the particular position
         feat = feat + pos_emb[:, position : position + 1, :]
         return feat
+    
+class RNNPositionalEncoding(nn.Module):
+    def __init__(self, max_length: int, embed_dim: int, hidden_dim: int = None, num_layers: int = 1):
+        super().__init__()
+        self.max_length = max_length
+        self.embed_dim = embed_dim
+        self.hidden_dim = hidden_dim if hidden_dim is not None else embed_dim
+        self.num_layers = num_layers
+        
+        self.rnn = nn.GRU(
+            input_size=embed_dim,
+            hidden_size=self.hidden_dim,
+            num_layers=num_layers,
+            batch_first=True
+        )
 
+        if self.hidden_dim != embed_dim:
+            self.proj = nn.Linear(self.hidden_dim, embed_dim)
+        else:
+            self.proj = nn.Identity()
+            
+        # Position embeddings as input to RNN
+        self.position_embeddings = nn.Embedding(max_length, embed_dim)
+
+    def get_position_encodings(self, batch_size: int, seq_len: int, device: torch.device):
+        """Generate position encodings for given batch size and sequence length"""
+        # Create position indices [0, 1, ..., seq_len-1]
+        positions = torch.arange(seq_len, device=device).unsqueeze(0).expand(batch_size, -1)  # [B, L]
+        # Get position embeddings [B, L, D]
+        pos_emb = self.position_embeddings(positions)
+        # Process through GRU
+        pos_encoding, _ = self.rnn(pos_emb)  # [B, L, hidden_dim]
+        return pos_encoding
+
+    def forward(self, feat):
+        """Add positional encoding to the input features
+        Args:
+            feat: Input tensor of shape [B, L, D]
+        Returns:
+            Tensor of shape [B, L, D] with added positional encodings
+        """
+        B, L, _ = feat.shape
+        pos_enc = self.get_position_encodings(B, L, feat.device)  # [B, L, D]
+        if self.hidden_dim != self.embed_dim:
+            # Project to original dimension if needed
+            pos_enc = self.proj(pos_enc)  # [B, L, D]
+        return feat + pos_enc
+
+    def forward_with_position(self, feat, position: int):
+        """Add positional encoding at a specific position
+        Args:
+            feat: Input tensor of shape [B, 1, D]
+            position: Position index to add encoding for
+        Returns:
+            Tensor of shape [B, 1, D] with added positional encoding
+        """
+        
+        B, L, _ = feat.shape[0]
+        assert L == 1, "Input feature should have length 1 at dim 1"
+        
+        # Run the RNN with the full sequence up to this point
+        rnn_output = self.get_position_encodings(B, position + 1, feat.device)  # [B, L, D]
+        # Get only the last position's output
+        pos_enc = rnn_output[:, -1:, :]  # [B, 1, hidden_dim]
+        if self.hidden_dim != self.embed_dim:
+            # Project to original dimension if needed
+            pos_enc = self.proj(pos_enc)  # [B, 1, D]
+        return feat + pos_enc
 
 class PositionwiseFeedForward(nn.Module):
     """A two-feed-forward-layer module"""
