@@ -97,7 +97,7 @@ def train_world_model_step(
     demonstration_batch_size,
     batch_length: int,
     logger,
-    ):
+):
     """
     Train single step of the world model with the sampled data from replay buffer
     """
@@ -120,7 +120,7 @@ def world_model_imagine_data(
     imagine_batch_length,
     log_video,
     logger,
-    ):
+):
     """
     Sample context from replay buffer, then imagine data with world model and agent
     """
@@ -163,10 +163,9 @@ def joint_train_world_model_agent(
     save_every_steps,
     seed,
     logger,
+    args,
 ):
-    # create ckpt dir
-    os.makedirs(f"ckpt/{args.n}", exist_ok=True)
-
+    os.makedirs(f"ckpt/{args.exp_name}", exist_ok=True)
     # build vec env, not useful in the Atari100k setting
     # but when the max_steps is large, you can use parallel envs to speed up
     vec_env = build_vec_env(env_name, image_size, num_envs=num_envs, seed=seed)
@@ -312,9 +311,12 @@ def joint_train_world_model_agent(
                 + colorama.Style.RESET_ALL
             )
             torch.save(
-                world_model.state_dict(), f"ckpt/{args.n}/world_model_{total_steps}.pth"
+                world_model.state_dict(),
+                f"ckpt/{args.exp_name}/world_model_{total_steps}.pth",
             )
-            torch.save(agent.state_dict(), f"ckpt/{args.n}/agent_{total_steps}.pth")
+            torch.save(
+                agent.state_dict(), f"ckpt/{args.exp_name}/agent_{total_steps}.pth"
+            )
 
 
 if __name__ == "__main__":
@@ -403,6 +405,7 @@ if __name__ == "__main__":
             save_every_steps=conf.JointTrainAgent.SaveEverySteps,
             seed=args.seed,
             logger=logger,
+            args=args,
         )
     else:
         raise NotImplementedError(f"Task {conf.Task} not implemented")
