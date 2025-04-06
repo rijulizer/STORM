@@ -157,3 +157,4 @@ cython_debug/
 ckpt/
 runs/
 eval_result/
+wandb/

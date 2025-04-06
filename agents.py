@@ -29,7 +29,7 @@ def calc_lambda_return(rewards, values, termination, gamma, lam, dtype=torch.flo
     batch_size, batch_length = rewards.shape[:2]
     # gae_step = torch.zeros((batch_size, ), dtype=dtype, device=device)
     gamma_return = torch.zeros(
-        (batch_size, batch_length + 1), dtype=dtype, device=DEVICE.type
+        (batch_size, batch_length + 1), dtype=dtype, device=DEVICE
     )
     gamma_return[:, -1] = values[:, -1]
     for t in reversed(range(batch_length)):  # with last bootstrap

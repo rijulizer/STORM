@@ -12,7 +12,11 @@ from sub_models.attention_blocks import (
     get_subsequent_mask_with_batch_length,
     get_subsequent_mask,
 )
-from sub_models.transformer_model_v2 import StochasticTransformerKVCache, MLATransformerKVCache
+from sub_models.transformer_model import (
+    StochasticTransformerKVCache,
+    MLATransformerKVCache,
+    TEMTransformerKVCache,
+)
 from sub_models.constants import DEVICE, DTYPE_16
 import agents
 
@@ -287,7 +291,7 @@ class WorldModel(nn.Module):
             stem_channels=32,
             final_feature_width=self.final_feature_width,
         )
-        self.storm_transformer = MLATransformerKVCache(
+        self.storm_transformer = TEMTransformerKVCache(
             stoch_dim=self.stoch_flattened_dim,
             action_dim=action_dim,
             feat_dim=transformer_hidden_dim,
@@ -457,7 +461,7 @@ class WorldModel(nn.Module):
         imagine_batch_length,
         log_video,
         logger,
-        ):
+    ):
         self.init_imagine_buffer(
             imagine_batch_size, imagine_batch_length, dtype=self.tensor_dtype
         )
