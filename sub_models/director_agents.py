@@ -1,4 +1,5 @@
 import copy
+from collections import defaultdict
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -446,6 +447,7 @@ class DirectorAgent(nn.Module):
         self.kl_controller = AdaptiveKLController(
             init_kl_coef=0.0, target=10.0, horizon=100
         )  # config
+        self.carry = self.initiate_carry()
         self.manager = BaseAgent(
             [  # Manager gets only external WM reward and exploration reward
                 {"critic": "extr", "scale": 1.0, "reward_fn": self.extr_reward},
@@ -491,6 +493,20 @@ class DirectorAgent(nn.Module):
         #     )
         return dist
 
+    def initiate_carry(
+        self,
+    ) -> dict:
+        """
+        Initialize the internal carry states of director agent.
+        Holds entities like- goal, skill, step etc.
+        """
+        carry = defaultdict(str)
+        carry["step"] = 0
+        carry["goal"] = torch.zeros(self.wm_sample_dim)
+        carry["skill"] = torch.zeros(self.skill_shape_flatten)
+        # carry["action"] = torch.zeros(self.wm_action_dim)
+        return carry
+
     def extr_reward(self, imagine_rollout):
         """
         Return the external reward or the actual reward from the world model.
@@ -533,25 +549,20 @@ class DirectorAgent(nn.Module):
             # return the second element onward [B, L]
             return reward  # [:, 1:]
 
-    def policy_step(
-        self,
-        imagine_rollout: dict,
-        update_goal: bool = True,
-    ):
+    def policy_step(self, latent):
         """
         Hierarchical policy step function. First decides whether to update the goal from the manager.
         Then based on the goal, get the workers action logits.
+        Args: Latent: The latent state from the world model. cat([sample, hidden]) [B, L, 2Z]
         Returns:
             action_dist: A torch distribution object for actions.
             goal: Updated or existing goal.
         """
-        hidden = imagine_rollout["hidden"]  # [B, L, Z]
-        sample = imagine_rollout["sample"]  # [B, L, Z]
-        goal = imagine_rollout["goal"]  # [B, L, Z]
-        latent = torch.cat((hidden, sample), dim=-1)  # [B, L, 2*]
+        step = self.carry["step"]
+        goal = self.carry["goal"]
         # TODO: stop_geadients()
         with torch.no_grad():
-            if update_goal:
+            if step % self.skill_duration == 0:
                 # Get new skill and goal from the manager
                 # Get skill: manager actor logits from latent
                 # TODO: Director has a .sample()
@@ -559,8 +570,8 @@ class DirectorAgent(nn.Module):
                 # Decode new goal from skill #TODO: Director uses latent as a context
                 goal = self.goal_decoder(skill).mode()  # shape: [B, L, goal_dim]
                 # imagine rollout
-                imagine_rollout["skill"] = skill  # [B, L, 64]
-                imagine_rollout["goal"] = goal  # [B, L, Z]
+                self.carry["skill"] = skill  # [B, L, 64]
+                self.carry["goal"] = goal  # [B, L, Z]
             # FIXME: Deviating from director implementation
             # Get worker action logits from latent and goal and delta
             # Input to the worker actor is laent and goal concat # [B, L, 3*Z]
@@ -568,7 +579,32 @@ class DirectorAgent(nn.Module):
             # because finally action is discrete, we need to convert the logits to action distribution
             action_dist = torch.distributions.Categorical(logits=action_logits)
             # TODO: Have mechnanism to save the goal for visualization
-            return action_dist, imagine_rollout
+        self.carry["step"] += 1  # everytime the policy step is called
+
+        return action_dist
+
+    @torch.no_grad()
+    def sample(self, latent, greedy=False):
+        """
+        Get the action from the Agent's policy distribution using the latent state.
+        Based on greedy or sampling.
+        """
+        self.eval()
+        with torch.autocast(
+            device_type=DEVICE.type, dtype=DTYPE_16, enabled=self.use_amp
+        ):
+
+            action_dist = self.policy_step(latent)
+            if greedy:
+                action = action_dist.probs.argmax(dim=-1)
+            else:
+                action = action_dist.sample()
+        return action
+
+    def sample_as_env_action(self, latent, greedy=False):
+        # This is required to integrate with the train loop.
+        action = self.sample(latent, greedy)
+        return action.detach().cpu().squeeze(-1).numpy()
 
     def train_goal_vae_step(self, imagine_rollout: dict):
         """
@@ -765,9 +801,6 @@ class DirectorAgent(nn.Module):
 
 
 # TODO: This was part of BaseAgent but this needs to be preset as train.py uses this
-# def sample_as_env_action(self, latent, greedy=False):
-#         action = self.sample(latent, greedy)
-#         return action.detach().cpu().squeeze(-1).numpy()
 
 
 #     def initial_carry(self, batch_size, skill_dim):
@@ -777,7 +810,3 @@ class DirectorAgent(nn.Module):
 #             ),
 #             "goal": torch.zeros((batch_size, skill_dim), device=torch.device("cuda")),
 #         }
-
-# def sample_as_env_action(self, latent, greedy=False):
-#     action = self.sample(latent, greedy)
-#     return action.detach().cpu().squeeze(-1).numpy()

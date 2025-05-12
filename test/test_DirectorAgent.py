@@ -43,10 +43,17 @@ goal_reward = agent.goal_reward(imagine_rollout)
 print(f"Goal reward shape: {goal_reward.shape}")
 
 # Test Policy step function
-action_dist, imagine_rollout = agent.policy_step(imagine_rollout, update_goal=True)
+latent = torch.cat((imagine_rollout["sample"], imagine_rollout["hidden"]), dim=-1)
+action_dist = agent.policy_step(latent)
 print(f"\n\nAction distribution shape: {action_dist.sample().shape}")
-print(f"skill shape: {imagine_rollout['skill'].shape}")
-print(f"goal shape: {imagine_rollout['goal'].shape}")
+print(f"steps after call: {agent.carry["step"]}")
+print(f"skill shape: {agent.carry['skill'].shape}")
+print(f"goal shape: {agent.carry['goal'].shape}")
+
+## Test sample function
+sampled_action = agent.sample(latent)
+print(f"Sampled action shape: {sampled_action.shape}")
+
 
 # ## Policy-step breakdown
 # hidden = imagine_rollout["hidden"]  # [B, L, Z]
@@ -124,25 +131,25 @@ print(f"goal shape: {imagine_rollout['goal'].shape}")
 #     \ntotal_loss: {total_loss}"""
 # )
 
-print("\n\nWM Imagine Rollout Shapes->")
-for k, v in imagine_rollout.items():
-    print(f"{k}: {v.shape}")
-
-
-## Train Manger Worker
-imagine_rollout["reward_extr"] = agent.extr_reward(imagine_rollout)
-imagine_rollout["reward_expl"] = agent.explr_reward(imagine_rollout)
-imagine_rollout["reward_goal"] = agent.goal_reward(imagine_rollout)
-imagine_rollout["delta"] = imagine_rollout["goal"] - imagine_rollout["sample"]
-# print("\nTrajectory Shapes->")
+# print("\n\nWM Imagine Rollout Shapes->")
 # for k, v in imagine_rollout.items():
 #     print(f"{k}: {v.shape}")
 
-## Test manager trajectory
-manager_trajectory = agent.manager_traj(imagine_rollout)
-print("\n\nManager Trajectory Shapes->")
-for k, v in manager_trajectory.items():
-    print(f"{k}: {v.shape}")
+
+# ## Train Manger Worker
+# imagine_rollout["reward_extr"] = agent.extr_reward(imagine_rollout)
+# imagine_rollout["reward_expl"] = agent.explr_reward(imagine_rollout)
+# imagine_rollout["reward_goal"] = agent.goal_reward(imagine_rollout)
+# imagine_rollout["delta"] = imagine_rollout["goal"] - imagine_rollout["sample"]
+# # print("\nTrajectory Shapes->")
+# # for k, v in imagine_rollout.items():
+# #     print(f"{k}: {v.shape}")
+
+# ## Test manager trajectory
+# manager_trajectory = agent.manager_traj(imagine_rollout)
+# print("\n\nManager Trajectory Shapes->")
+# for k, v in manager_trajectory.items():
+#     print(f"{k}: {v.shape}")
 """
 Manager Trajectory Shapes->
 hidden: torch.Size([3, 3, 32])
@@ -199,10 +206,10 @@ weight: torch.Size([3, 3])
 #     print(f"{key}: {value.shape}")
 
 ## Test Worker Trajectory
-worker_trajerctory = agent.worker_traj(imagine_rollout)
-print("\n\nWorker Trajectory Shapes->")
-for k, v in worker_trajerctory.items():
-    print(f"{k}: {v.shape}")
+# worker_trajerctory = agent.worker_traj(imagine_rollout)
+# print("\n\nWorker Trajectory Shapes->")
+# for k, v in worker_trajerctory.items():
+#     print(f"{k}: {v.shape}")
 """
 Worker Trajectory Shapes->
 hidden: torch.Size([6, 9, 32])
@@ -273,13 +280,13 @@ weight: torch.Size([6, 9])
 # for key, value in traj.items():
 #     print(f"{key}: {value.shape}")
 
-metrics = {}
-# generate the manager and worker trajectories
-manager_traj = agent.manager_traj(imagine_rollout)
-worker_traj = agent.worker_traj(imagine_rollout)
-# Train the manager and worker
-mets = agent.worker.update(worker_traj)
-metrics.update({f"worker_{k}": v for k, v in mets.items()})
+# metrics = {}
+# # generate the manager and worker trajectories
+# manager_traj = agent.manager_traj(imagine_rollout)
+# worker_traj = agent.worker_traj(imagine_rollout)
+# # Train the manager and worker
+# mets = agent.worker.update(worker_traj)
+# metrics.update({f"worker_{k}": v for k, v in mets.items()})
 # mets = agent.manager.update(manager_traj)
 # metrics.update({f"manager_{k}": v for k, v in mets.items()})
 # print(f"\n\nMetrics after training: {metrics}")
