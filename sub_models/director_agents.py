@@ -53,13 +53,13 @@ class BaseAgent(nn.Module):
                 So if actual input_dim is a tuple, then it should be flattened to int.
         """
         super().__init__()
-        self.critics = critics  # TODO: How to use the scales?
+        self.critics = critics
         self.input_dim = input_dim
         self.action_dim = action_dim
         self.critic_op_dim = 255  # TODO: Check this # 255 in STORM
         self.hidden_dim = 512  # config
         self.num_layers = 4  # config
-        self.gamma = None  # config #TODO: Check this
+        self.gamma = 0.985
         self.clip_value = 100.0  # Gradient clipping value
         self.discount = 0.99  # config
         self.lambd = 0.95  # config
@@ -183,35 +183,40 @@ class BaseAgent(nn.Module):
                 action = action_dist.probs.argmax(dim=-1)
             else:
                 action = action_dist.sample()
-        return action
+        return action  # [B, L]
 
-    def sample_as_env_action(self, latent, greedy=False):
-        action = self.sample(latent, greedy)
-        return action.detach().cpu().squeeze(-1).numpy()
-
-    def update(self, imagine_rollout, logger=None):
+    def update(self, traj, logger=None):
         """
         Update policy and value models using imagine rollout.
         Args:
-            latent: The concat(latent,sample) state representation from WM.
+            traj: A dict that holds the state representation from WM
+                and other important entities.
         """
         metrics = {}
         # All have the shape [B, L, *]
-        hidden = imagine_rollout["hidden"]  # The hidden state from WM
-        sample = imagine_rollout["sample"]  # The sample from WM
+        hidden = traj["hidden"]  # The hidden state from WM
+        sample = traj["sample"]  # The sample from WM
         # reward = imagine_rollout["reward"]
-        action = imagine_rollout["action"]
+        action = traj["action"]  # [B, L]
         # cont = imagine_rollout["cont"]
-        termination = imagine_rollout["termination"]
-        latent = torch.cat((latent, sample), dim=-1)  # [B, L, 2*]
+        termination = traj["termination"]
+        goal = traj.get("goal", None)
+        if goal is not None:
+            # for the case of worker the goal is also part of latent
+            latent = torch.cat((hidden, sample, goal), dim=-1)  # [B, L, 3*]
+        else:
+            latent = torch.cat((hidden, sample), dim=-1)  # [B, L, 2*]
         self.train()
         with torch.autocast(
             device_type=DEVICE.type, dtype=DTYPE_16, enabled=self.use_amp
         ):
             # Get action logits using actor model
             action_logits = self.actor(latent)
-            action_dist = distributions.Categorical(logits=action_logits[:, :-1])
-            log_prob = action_dist.log_prob(action)
+            # [B, L, action_dim]
+            action_dist = distributions.Categorical(logits=action_logits)
+            # get the log prob of the actual action
+            # Expects action to have values between 0 and action_dim-1
+            log_prob = action_dist.log_prob(action)  # [B, L]
 
             total_critic_loss = 0.0
             total_value_loss = 0.0
@@ -226,7 +231,7 @@ class BaseAgent(nn.Module):
 
                 # Generate critic reward function specific reward
                 # reward functions operate on Deter in Director ~ Sample in STORM
-                reward = critic["reward_fn"](sample)  # TODO: Check input sample
+                reward = critic["reward_fn"](traj)  # TODO: Check input sample
                 lambda_return = calc_lambda_return(
                     reward, value, termination, self.gamma, self.lambd
                 )
@@ -359,7 +364,7 @@ class GoalEncoder(nn.Module):
         for layer in self.dense_layers:
             x = layer(x)
         # Reshape back to match input batch dimensions
-        x = x.reshape(B, L, *self._op_dim)
+        x = x.reshape(B, L, *self._op_dim)  # [B, L, K, K]
         # Apply the distribution layer
         probs = F.softmax(x, dim=-1)
         uniform = torch.ones_like(probs) / probs.shape[-1]
@@ -424,163 +429,17 @@ class GoalDecoder(nn.Module):
         return dist
 
 
-# class VFunction(nn.Module):
-#     """
-#     This class implements a critic network that evaluates the value of states or state-action pairs.
-#     """
-
-#     def __init__(self, reward_func, input_dim, op_dim):
-#         super().__init__()
-#         self.reward_func = reward_func
-#         self.input_dim = input_dim
-#         self.op_dim = op_dim
-#         self.layers = 4  # config
-#         self.hidden_dim = 512  # config
-
-#         # Build dense layers for the main network
-#         self.critic_net = nn.Sequential(
-#             nn.Linear(input_dim, self.hidden_dim),
-#             nn.LayerNorm(self.hidden_dim),
-#             nn.ELU(),
-#             *[  # middle layers
-#                 nn.Sequential(
-#                     nn.Linear(self.hidden_dim, self.hidden_dim),
-#                     nn.LayerNorm(self.hidden_dim),
-#                     nn.ELU(),
-#                 )
-#                 for _ in range(self.num_layers - 2)
-#             ],
-#             nn.Linear(self.hidden_dim, op_dim),
-#             nn.LayerNorm(op_dim),
-#             nn.ELU(),
-#         )
-#         # Create a slow target network
-#         self.slow_critic_net = copy.deepcopy(self.critic_net)
-#         self.updates = 0
-#         # TODO: This step is taken from STORM; DIrector implements symlog distribution
-#         self.symlog_twohot_loss = SymLogTwoHotLoss(255, -20, 20)
-#         # Define optimizer for the critic network
-#         self.critic_opt = torch.optim.Adam(
-#             self.parameters(),
-#             lr=1e-4,
-#             eps=1e-6,
-#             weight_decay=1e-2,
-#         )
-#         self.clip_value = 100.0  # Gradient clipping value
-#         self.discount = 0.99  # config
-#         self.return_lambda = 0.95  # config
-
-#     def get_value(self, x):
-#         """
-#         Forward pass through the critic network.
-#         """
-#         value = self.critic_net(x)
-#         value = self.symlog_twohot_loss.decode(value)
-#         return value
-
-#     @torch.no_grad()
-#     def slow_value(self, x):
-#         """
-#         Use the slow critic network to get the slow-value.
-#         """
-#         value = self.slow_critic_net(x)
-#         value = self.symlog_twohot_loss.decode(value)
-#         return value
-
-#     def train(self, imagine_rollout):
-#         """
-#         Train the critic network using the provided trajectory and actor.
-#         Args:
-#             latent: The concat(latent,sample) state representation from WM.
-#         """
-#         metrics = {}
-#         # All have the shape [B, L, *]
-#         latent = imagine_rollout["latent"]  # The concat(latent,sample)
-#         # reward = imagine_rollout["reward"]
-#         action = imagine_rollout["action"]
-#         cont = imagine_rollout["cont"]
-#         # Calculate the reward using the reward function
-#         reward = self.reward_func(imagine_rollout)
-
-#         # Calculate the target values; [B, L-1]
-#         target, _ = self.target(latent, reward, action, cont).detach()
-
-#         # TODO: merge this part with STORM code logic
-#         # Compute loss
-#         value = self.get_value(latent)  # [B, L]
-#         loss = -(
-#             value.log_prob(target) * imagine_rollout["weight"][:-1]
-#         ).mean()  # FIXME: This is not correct
-
-#         # Backward pass
-#         self.critic_opt.zero_grad()
-#         loss.backward()
-#         torch.nn.utils.clip_grad_norm_(self.parameters(), self.clip_value)
-#         self.critic_opt.step()
-
-#         # Update metrics
-#         metrics.update(
-#             {
-#                 "critic_loss": loss.item(),
-#                 "reward_mean": reward.mean().item(),
-#                 "reward_std": reward.std().item(),
-#                 "critic_mean": value.mean.mean().item(),
-#                 "critic_std": value.mean.std().item(),
-#                 "return_mean": target.mean().item(),
-#                 "return_std": target.std().item(),
-#             }
-#         )
-#         self.update_slow()
-#         return metrics
-
-#     def target(self, latent, reward, action, cont):
-#         """
-#         Compute the target values for training the critic.
-#         Args: These are the components of imagine_rollout Each have shape [B, L, *]
-#             latent: Represents the latent state (e.g., an encoded representation of the environment's state).
-#             reward: The rewards obtained during a rollout (sequence of steps in the environment).
-#             action: The actions taken during the rollout.
-#             cont: A continuation signal, often used to indicate whether a state is terminal (e.g., 1 for non-terminal, 0 for terminal states).
-#         """
-#         if len(reward) != len(action) - 1:
-#             raise AssertionError("Should provide rewards for all but last action.")
-#         # Calculate discount factor, take from the second one
-#         disc = cont[:, 1:] * self.discount  # [B, L-1]
-#         value = self.get_value(latent)  # [B, L]
-#         vals = [value[:, -1]]  # take the last value along the length dimension
-#         # interim = immediate reward + discounted value of the next state
-#         interm = reward + disc * value[:, 1:] * (1 - self.return_lambda)  # [B, L-1]
-#         # The loop iteratively computes the target values,by combining immediate rewards (interm[t])
-#         # with discounted future values (vals[-1]).
-#         for t in reversed(range(disc.shape[1])):  # iterate over the length dimension
-#             vals.append(interm[:, t] + disc[:, t] * self.return_lambda * vals[-1])
-#         ret = torch.stack(
-#             list(reversed(vals))[:-1], dim=1
-#         )  # stack along the length dimension
-#         return ret, value[:, :-1]  # [B, L-1], [B, 1]
-
-#     @torch.no_grad()
-#     def update_slow_critic(self, decay=0.98):
-#         """
-#         Update slow critic models parameters with decay.
-#         """
-#         for slow_param, param in zip(
-#             self.slow_critic_net.parameters(), self.critic_net.parameters()
-#         ):
-#             slow_param.data.copy_(slow_param.data * decay + param.data * (1 - decay))
-#             # TODO: Is this going to reflect in the model or an .update() call needed?
-
-
 class DirectorAgent(nn.Module):
     def __init__(self, wm_hidden_dim: int, wm_sample_dim: int, wm_action_dim: int):
         super().__init__()
 
-        self.feat_dim = wm_hidden_dim + wm_sample_dim  # WM latent dim
+        self.wm_sample_dim = wm_sample_dim
+        self.wm_feat_dim = wm_hidden_dim + wm_sample_dim  # WM latent dim
         self.skill_duration = 8  # config
         self.skill_shape = (8, 8)  # config
         self.skill_shape_flatten = self.skill_shape[0] * self.skill_shape[1]
-        self.goal_encoder = GoalEncoder(self.feat_dim, self.skill_shape)
-        self.goal_decoder = GoalDecoder(self.skill_shape_flatten, self.feat_dim)
+        self.goal_encoder = GoalEncoder(self.wm_sample_dim, self.skill_shape)
+        self.goal_decoder = GoalDecoder(self.skill_shape_flatten, self.wm_sample_dim)
 
         self.skill_prior = self.get_skill_prior()
         self.discount = 0.99  # config
@@ -592,22 +451,21 @@ class DirectorAgent(nn.Module):
                 {"critic": "extr", "scale": 1.0, "reward_fn": self.extr_reward},
                 {"critic": "expl", "scale": 0.1, "reward_fn": self.explr_reward},
             ],
-            input_dim=self.feat_dim,
+            input_dim=self.wm_feat_dim,
             action_dim=self.skill_shape_flatten,
         )
         self.worker = BaseAgent(
             critics=[
                 {"critic": "goal", "scale": 1.0, "reward_fn": self.goal_reward},
             ],
-            input_dim=wm_hidden_dim
-            + wm_sample_dim
-            + wm_sample_dim,  # goal_dim = wm_sample_dim
+            input_dim=self.wm_feat_dim + wm_sample_dim,  # goal_dim = wm_sample_dim
             action_dim=wm_action_dim,
         )
         self.optimizer = torch.optim.Adam(
             self.parameters(), lr=3e-5, eps=1e-5
         )  # FIXME: check which params are optimized!
         # Enable scaler based on DEVICE type
+        self.use_amp = True
         self.scaler = (
             torch.cuda.amp.GradScaler(enabled=self.use_amp)
             if DEVICE.type == "cuda"
@@ -624,66 +482,60 @@ class DirectorAgent(nn.Module):
         logits = torch.zeros(self.skill_shape)
         dist = torch.distributions.OneHotCategorical(logits=logits)
         # Wrap in Independent if shape > 1
-        if len(self.skill_shape) > 1:
-            # this will be the case if the shape is like [8, 8]
-            dist = torch.distributions.Independent(
-                dist, reinterpreted_batch_ndims=len(self.skill_shape) - 1
-            )
+        # TODO: FInd alternative for Independent in torch distributions
+        # as this dirstribution is not supported for KL divergence
+        # if len(self.skill_shape) > 1:
+        #     # this will be the case if the shape is like [8, 8]
+        #     dist = torch.distributions.Independent(
+        #         dist, reinterpreted_batch_ndims=len(self.skill_shape) - 1
+        #     )
         return dist
 
     def extr_reward(self, imagine_rollout):
         """
         Return the external reward or the actual reward from the world model.
         """
-        # retunn the reward from the world model [B, L-1]
-        wm_reward = imagine_rollout["reward"][:, 1:]
+        # retunn the reward from the world model [B, L]
+        wm_reward = imagine_rollout["reward"]  # [:, 1:][B, L-1]
         return wm_reward
 
     def explr_reward(self, imagine_rollout):
         """
         Computes the ELBO reward based on the imagined rollout.
         """
-        wm_sample = imagine_rollout["sample"]  # [B, L, Z]
-        # Get encoded distribution
-        encoded_dist = self.goal_encoder(wm_sample)
-        # Get decoded distribution
-        decoded_dist = self.goal_decoder(encoded_dist.sample())
-        # Compute ELBO reward: MSE bteween decoded and actual
-        # the OP shape: [B, L]
-        reward = (
-            ((decoded_dist.mode() - wm_sample) ** 2).mean(-1).detach()
-        )  # TODO: check detach()
-        # return second element onwards [B, L-1]
-        return reward[:, 1:]
+        # TODO: check stop_gradient
+        with torch.no_grad():  # Stop gradient
+            wm_sample = imagine_rollout["sample"]  # [B, L, Z]
+            # Get encoded distribution
+            encoded_dist = self.goal_encoder(wm_sample)
+            # Get decoded distribution
+            decoded_dist = self.goal_decoder(encoded_dist.sample())
+            # Compute ELBO reward: MSE bteween decoded and actual
+            # the OP shape: [B, L]
+            reward = ((decoded_dist.mode() - wm_sample) ** 2).mean(-1)
+            # return second element onwards [B, L]
+            return reward  # [:, 1:][B, L-1]
 
     def goal_reward(self, imagine_rollout):
         """
         Cosine Max similarity
         Calculate reward based on the goal and the transition state.
         """
-        wm_sample = imagine_rollout["sample"].detach()  # Stop gradient for sample
-        goal = imagine_rollout["goal"].detach()  # Stop gradient for goal
-        # calculate normilization factor
-        norm = torch.maximum(
-            goal.norm(dim=-1, keepdim=True), wm_sample.norm(dim=-1, keepdim=True)
-        ).clamp_min(1e-12)
-        # [B, L, Z] -> [B, L]
-        reward = (goal / norm * wm_sample / norm).sum(dim=-1)
-        # return the second element onward [B, L-1]
-        return reward[:, 1:]
-
-    #     def initial_carry(self, batch_size, skill_dim):
-    #         return {
-    #             "step": torch.zeros(
-    #                 (batch_size,), dtype=torch.long, device=torch.device("cuda")
-    #             ),
-    #             "goal": torch.zeros((batch_size, skill_dim), device=torch.device("cuda")),
-    #         }
+        with torch.no_grad():  # Stop gradient
+            wm_sample = imagine_rollout["sample"].detach()  # Stop gradient for sample
+            goal = imagine_rollout["goal"].detach()  # Stop gradient for goal
+            # calculate normilization factor
+            norm = torch.maximum(
+                goal.norm(dim=-1, keepdim=True), wm_sample.norm(dim=-1, keepdim=True)
+            ).clamp_min(1e-12)
+            # [B, L, Z] -> [B, L]
+            reward = (goal / norm * wm_sample / norm).sum(dim=-1)
+            # return the second element onward [B, L]
+            return reward  # [:, 1:]
 
     def policy_step(
         self,
         imagine_rollout: dict,
-        agent_carry: dict,
         update_goal: bool = True,
     ):
         """
@@ -693,32 +545,30 @@ class DirectorAgent(nn.Module):
             action_dist: A torch distribution object for actions.
             goal: Updated or existing goal.
         """
-        latent = imagine_rollout["hidde"]  # [B, L, 2*Z]
-        goal = agent_carry["goal"]  # [B, L, Z]
-        skill = agent_carry["skill"]  # [B, L, Z]
-
-        # if update_goal flag is on,get new skill and goal from the manager
-        # TODO: chech which parts should be stop_geadients()
+        hidden = imagine_rollout["hidden"]  # [B, L, Z]
+        sample = imagine_rollout["sample"]  # [B, L, Z]
+        goal = imagine_rollout["goal"]  # [B, L, Z]
+        latent = torch.cat((hidden, sample), dim=-1)  # [B, L, 2*]
+        # TODO: stop_geadients()
         with torch.no_grad():
             if update_goal:
-
+                # Get new skill and goal from the manager
                 # Get skill: manager actor logits from latent
                 # TODO: Director has a .sample()
                 skill = self.manager.policy(latent)
                 # Decode new goal from skill #TODO: Director uses latent as a context
-                goal = self.goal_decoder(skill)  # shape: [B, L, goal_dim]
+                goal = self.goal_decoder(skill).mode()  # shape: [B, L, goal_dim]
                 # imagine rollout
-                agent_carry["skill"] = skill  # [B, L, 64]
-                agent_carry["goal"] = goal  # [B, L, 2*Z]
+                imagine_rollout["skill"] = skill  # [B, L, 64]
+                imagine_rollout["goal"] = goal  # [B, L, Z]
             # FIXME: Deviating from director implementation
             # Get worker action logits from latent and goal and delta
-            # Input to the worker actor is laent and goal concat # [B, L, 2*Z]
+            # Input to the worker actor is laent and goal concat # [B, L, 3*Z]
             action_logits = self.worker.actor(torch.cat((latent, goal), dim=-1))
             # because finally action is discrete, we need to convert the logits to action distribution
             action_dist = torch.distributions.Categorical(logits=action_logits)
             # TODO: Have mechnanism to save the goal for visualization
-
-        return action_dist, agent_carry
+            return action_dist, imagine_rollout
 
     def train_goal_vae_step(self, imagine_rollout: dict):
         """
@@ -736,7 +586,7 @@ class DirectorAgent(nn.Module):
         # Get decoded distribution
         decoded_dist = self.goal_decoder(skill_sample)
         # Reconstruction loss (negative log-likelihood)
-        recon_loss = -decoded_dist.log_prob(wm_sample.detach())  # TODO: check detach()
+        recon_loss = -decoded_dist.log_prob(wm_sample.detach())
         recon_loss = recon_loss.mean(-1)  # [B, L] -> [B]
 
         # KL divergence
@@ -744,10 +594,11 @@ class DirectorAgent(nn.Module):
         # [B, L] -> [B]
         kl_loss = torch.distributions.kl_divergence(
             encoded_dist, self.skill_prior
-        ).mean(-1)
+        ).mean((-2, -1))
         # during training
-        self.kl_controller.update(kl_loss.detach())
-        total_loss = recon_loss + self.kl_controller.kl_coef * kl_loss
+        kl_coef = self.kl_controller.update(kl_loss.detach())
+        # Average the total loss for the batch
+        total_loss = (recon_loss + kl_coef * kl_loss).mean()
 
         # Backward
         # TODO: move the optimizer steps togather in the update function
@@ -756,9 +607,9 @@ class DirectorAgent(nn.Module):
         self.optimizer.step()
 
         # Metrics
-        metrics["goal_klloss"] = kl_loss.item()
+        metrics["goal_recon_loss"] = recon_loss.mean().item()
+        metrics["goal_klloss"] = kl_loss.mean().item()
         metrics["goal_total_loss"] = total_loss.item()
-        metrics["goal_recon_loss"] = recon_loss.item()
 
         return metrics
 
@@ -795,6 +646,10 @@ class DirectorAgent(nn.Module):
         traj = imagine_rollout.copy()
         # for manager the action is the skill
         traj["action"] = traj.pop("skill")  # Replace "skill" with "action"
+        # also pop the world model reward as its present as extr_reward
+        traj.pop("reward")
+        # remove the goal from the manager's trajectory; its not used in actor critics
+        traj.pop("goal")
         traj["cont"] = 1 - traj["termination"]  # [1,1,1,0] -> [0,0,0,1] # [B, L]
         k = self.skill_duration  # Skill duration\
         reshape = lambda x: x.reshape(x.shape[0], x.shape[1] // k, k, *x.shape[2:])
@@ -803,28 +658,29 @@ class DirectorAgent(nn.Module):
             if "reward" in key:
                 # Compute weights for continuity along skill duration dimension
                 # all the elements after zero would be 0; else 1
-                weights = torch.cumprod((traj["cont"][:-1]), dim=1).unsqueeze(
-                    -1
-                )  # B, L, 1
+                weights = torch.cumprod((traj["cont"]), dim=1)  # B, L, 1
                 # Average rewards weighted by continuity along N dimension
                 # [B, L, *] -> [B, N, L, *] -> [B, N, *]
                 traj[key] = reshape(value * weights).mean(dim=2)
-            elif key == "cont":
+            elif key in ["cont", "termination"]:
                 # cont has the shape [B, L]
                 # [B,1] + [B, N-1]
                 # prod along the skill duration dimension
                 # concat along the N dimension, If one element is 0 then the product is 0
                 traj[key] = torch.cat(
-                    [value[:, 0], reshape(value[:, 1:]).prod(dim=2)], dim=1
-                )  # ->[B, N+1]
+                    [value[:, 0].unsqueeze(1), reshape(value).prod(dim=2)], dim=1
+                )  # ->[B, N+1] reshape(value[:, 1:]).prod(dim=2)
             else:
-                # Last value for the last sub-trajectory
-                last_value = value[:, -1, :]  # [B, 1, Z]
-                first_values = value[
-                    :, :-1, :
-                ]  # First value for the first sub-trajectory
+                # # Last value for the last sub-trajectory
+                last_value = value[:, -1, :].unsqueeze(1)  # [B, 1, Z]
+                first_values = value
+                # first_values = value[
+                #     :, :-1, :
+                # ]  # First value for the first sub-trajectory
                 first_values = reshape(first_values)[:, :, 0, :]  # [B, N, Z]
                 traj[key] = torch.cat([first_values, last_value], dim=1)  # [B, N+1, Z]
+                # For the manager, for hidden, sample, latent etc. take only the first one every K
+                # traj[key] = reshape(value)[:, :, 0, :]
 
         # Compute trajectory weights
         traj["weight"] = (
@@ -836,38 +692,37 @@ class DirectorAgent(nn.Module):
     def worker_traj(self, imagine_rollout: dict) -> dict:
         """
         Splits a trajectory for worker training.
-        traj = {
-                "action": np.arange(65),  # [0, 1, ..., 64]
-                "reward": np.arange(65),  # [0, 1, ..., 64]
-                "goal": np.arange(65),    # [0, 1, ..., 64]
-                "cont": np.ones(65),      # [1, 1, ..., 1]
-            }
-        output: output shape [B*N, K+1, F*] beacuse for the worker each sub trajectory is
+        There must be one dimesion for the skill duration representing the trajectory.
+        Output shape [B*N, K+1, F*] beacuse for the worker each sub trajectory is
         of len K+1, so the Batch and N dimensions are flattened into a single dimension.
         """
         traj = imagine_rollout.copy()
+        # also pop the world model reward as its present as extr_reward
+        traj.pop("reward")
+        traj["cont"] = 1 - traj["termination"]
         k = self.skill_duration  # Skill duration
-        assert (
-            len(traj["action"]) % k == 1
-        ), "Trajectory length must be divisible by skill duration + 1."
+        # assert (
+        #     len(traj["action"]) % k == 1
+        # ), "Trajectory length must be divisible by skill duration + 1."
 
         # Helper function to reshape tensors
         # [16,64] -> [2, 8, 64]; k=8
         reshape = lambda x: x.reshape(x.shape[0], x.shape[1] // k, k, *x.shape[2:])
-
         for key, val in traj.items():
             if "reward" in key:
                 # Prepend a zero to align rewards with sub-trajectories
-                val = torch.cat(
-                    [torch.zeros_like(val[:, :1, :]), val], dim=1
-                )  # Concat L dimension
-
+                # val = torch.cat(
+                #     [torch.zeros_like(val[:, 0]), val], dim=1
+                # )  # Concat L dimension [B, L+1]
+                val[:, 0] = 0  # Set the first value to zero for the worker reward
             # Split into overlapping sub-trajectories
             # (1 2 3 4 5 6 7 8 9 10) -> ((1 2 3 4) (4 5 6 7) (7 8 9 10))
             # Exclude the last element and reshape
-            reshaped_val = reshape(val[:, :-1, :])  # [B, N, K, *]
+            # reshaped_val = reshape(val[:, :-1, :])  # [B, N, K, *]
+            reshaped_val = reshape(val)  # [B, N, K, *]
             # Take every k-th element starting from k
-            overlap = val[:, k::k, :].unsqueeze(2)  # [B, N, 1, F]
+            # overlap = val[:, k::k].unsqueeze(2)  # [B, N, 1, F]
+            overlap = val[:, k - 1 :: k].unsqueeze(2)
             val = torch.cat([reshaped_val, overlap], dim=2)  # (B, N, k+1, F)
             # Flatten batch dimensions (N and B) into a single dimension
             val = val.reshape(
@@ -875,7 +730,7 @@ class DirectorAgent(nn.Module):
             )  # [B*N, K+1, F]
             # Remove the first sub-trajectory for rewards
             if "reward" in key:
-                val = val[:, 1:, :]  # [B*N, K, F]
+                val = val[:, 1:]  # [B*N, K]
             # update the trajectory with the reshaped values
             traj[key] = val
 
@@ -887,10 +742,9 @@ class DirectorAgent(nn.Module):
         traj["weight"] = (
             torch.cumprod(self.discount * traj["cont"], dim=1) / self.discount
         )  # [B*N, K+1] # example: [0.9, 0.81, 0.729, 0.6561, 0] # discount=0.9
-
         return traj
 
-    def train(self, imagine_rollout: dict):
+    def update(self, imagine_rollout: dict):
         """
         Update policy and value model
         """
@@ -908,3 +762,22 @@ class DirectorAgent(nn.Module):
             metrics.update(mets)
             # Log metrics
             metrics["success_manager"] = success(traj["reward_goal"]).item()
+
+
+# TODO: This was part of BaseAgent but this needs to be preset as train.py uses this
+# def sample_as_env_action(self, latent, greedy=False):
+#         action = self.sample(latent, greedy)
+#         return action.detach().cpu().squeeze(-1).numpy()
+
+
+#     def initial_carry(self, batch_size, skill_dim):
+#         return {
+#             "step": torch.zeros(
+#                 (batch_size,), dtype=torch.long, device=torch.device("cuda")
+#             ),
+#             "goal": torch.zeros((batch_size, skill_dim), device=torch.device("cuda")),
+#         }
+
+# def sample_as_env_action(self, latent, greedy=False):
+#     action = self.sample(latent, greedy)
+#     return action.detach().cpu().squeeze(-1).numpy()
