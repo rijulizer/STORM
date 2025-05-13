@@ -1,0 +1,6 @@
+1. Save the goal and skill from policy_step to replay buffer, imagine rollout
+2. Check the distributions of Manager, Worker, 
+    Done
+3. Check the distributions GoalEncoder and GoalDecoder and corresponding fitting
+    Done
+4. Check Device, backpropagation and optimization related code

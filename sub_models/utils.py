@@ -1,4 +1,6 @@
 import torch
+from torch.distributions import Categorical
+import torch.nn.functional as F
 
 
 class MSEDist(torch.distributions.Distribution):
@@ -43,3 +45,54 @@ class MSEDist(torch.distributions.Distribution):
         loss = distance.sum(self._axes)
 
         return loss
+
+
+class OneHotDist(torch.nn.Module):
+    def __init__(self, logits: torch.Tensor):
+        """
+        Args:
+            logits: Tensor of shape [..., M, K], where:
+                - ... are any number of batch dims (e.g., B, L)
+                - M is number of categorical variables
+                - K is number of classes per variable
+        """
+        super().__init__()
+        assert logits.dim() >= 2, "Expected logits of shape [..., M, K]"
+        self.logits = logits
+        *self.B, self.M, self.K = logits.shape
+
+    def sample(self):
+        """
+        Returns:
+            Differentiable one-hot sample of shape [..., M, K]
+        """
+        # Flatten for sampling: [B*L*M, K]
+        flat_logits = self.logits.reshape(-1, self.K)  # [N*M, K]
+        indices = Categorical(logits=flat_logits).sample()  # [N*M]
+        hard = F.one_hot(indices, num_classes=self.K).float()  # [N*M, K]
+        hard = hard.reshape(*self.B, self.M, self.K)
+
+        probs = F.softmax(self.logits, dim=-1)
+        return (hard - probs).detach() + probs  # Straight-through gradient trick
+
+    def log_prob(self, one_hot_action: torch.Tensor):
+        """
+        Args:
+            one_hot_action: [..., M, K] one-hot encoded action
+
+        Returns:
+            log_prob: [..., M]
+        """
+        log_probs = F.log_softmax(self.logits, dim=-1)
+        return (log_probs * one_hot_action).sum(dim=-1)
+
+    def entropy(self):
+        """
+        Computes the entropy of the distribution.
+        E = -sum(p * log(p)) where p is the probability of each class.
+        Returns:
+            torch.Tensor: The entropy of the distribution.
+        """
+        log_probs = F.log_softmax(self.logits, dim=-1)
+        probs = torch.exp(log_probs)
+        return -(log_probs * probs).sum(dim=-1)

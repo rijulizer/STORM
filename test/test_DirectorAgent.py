@@ -2,16 +2,18 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.distributions as distributions
-from sub_models.director_agents import DirectorAgent
+from sub_models.director_agents import DirectorAgent, percentile, calc_lambda_return
 
 # Write some sample example cases for GoalEncoder and GoalDecoder
 wm_hidden_dim = 32
 wm_sample_dim = 32
 wm_action_dim = 4
+skill_dim = 8
 B = 3
 L = 16
 wm_latent = torch.randn(B, L, wm_hidden_dim)
 wm_sample = torch.randn(B, L, wm_hidden_dim)
+skill = torch.randn(B, L, skill_dim, skill_dim)
 wm_termination = torch.zeros(B, L)
 wm_termination[:, -1] = 1
 wm_action = torch.randint(low=0, high=wm_action_dim, size=(B, L))  # Shape: [B, L]
@@ -24,71 +26,89 @@ imagine_rollout = {
     "termination": wm_termination,
     "reward": wm_reward,
     "goal": wm_sample,
+    "skill": skill,
 }
 
 
 ## Define the DirectorAgent
 agent = DirectorAgent(wm_hidden_dim, wm_sample_dim, wm_action_dim)
 
+
 ## Test external reward function
 extr_reward = agent.extr_reward(imagine_rollout)
 print(f"\n\nExternal reward shape: {extr_reward.shape}")
-
 ## Test explr_reward function
 explr_reward = agent.explr_reward(imagine_rollout)
 print(f"Exploration reward shape: {explr_reward.shape}")
-
 ## Test Goal reward function
 goal_reward = agent.goal_reward(imagine_rollout)
 print(f"Goal reward shape: {goal_reward.shape}")
+"""
+External reward shape: torch.Size([3, 16])
+Exploration reward shape: torch.Size([3, 16])
+Goal reward shape: torch.Size([3, 16])
+"""
 
-# Test Policy step function
+
+## Test Manager
 latent = torch.cat((imagine_rollout["sample"], imagine_rollout["hidden"]), dim=-1)
-action_dist = agent.policy_step(latent)
+actor_logits = agent.manager.actor(latent)
+actor_dist = agent.manager.policy(latent)
+actor_dist_sample = actor_dist.sample()
+actor_log_prob = actor_dist.log_prob(skill)
+print(f"\n\nActor logits shape: {actor_logits.shape}")
+print(f"Actor distribution sample shape: {actor_dist_sample.shape}")
+print(f"Actor log probability shape: {actor_log_prob.shape}")
+"""
+Actor logits shape: torch.Size([3, 16, 64])
+Actor distribution sample shape: torch.Size([3, 16, 8, 8])
+Actor log probability shape: torch.Size([3, 16, 8])
+"""
+
+
+
+##Test Policy step function
+latent = torch.cat((imagine_rollout["sample"], imagine_rollout["hidden"]), dim=-1)[:, 0:1]
+action_dist, goal, skill = agent.policy_step(latent)
 print(f"\n\nAction distribution shape: {action_dist.sample().shape}")
 print(f"steps after call: {agent.carry["step"]}")
-print(f"skill shape: {agent.carry['skill'].shape}")
-print(f"goal shape: {agent.carry['goal'].shape}")
-
+print(f"skill shape: {skill.shape}")
+print(f"goal shape: {goal.shape}")
+"""
+Action distribution shape: torch.Size([3, 1])
+steps after call: 1
+skill shape: torch.Size([3, 1, 8, 8])
+goal shape: torch.Size([3, 1, 32])
+"""
 ## Test sample function
-sampled_action = agent.sample(latent)
-print(f"Sampled action shape: {sampled_action.shape}")
+# sampled_action = agent.sample(latent)
+# print(f"Sampled action shape: {sampled_action.shape}")
 
-
-# ## Policy-step breakdown
-# hidden = imagine_rollout["hidden"]  # [B, L, Z]
-# sample = imagine_rollout["sample"]  # [B, L, Z]
-# goal = imagine_rollout["goal"]  # [B, L, Z]
-# B, L, Z = goal.shape
-# latent = torch.cat((hidden, sample), dim=-1)  # [B, L, 2*]
-# update_goal = True
-# with torch.no_grad():
-#     if update_goal:
-#         # Get new skill and goal from the manager
-#         # Get skill: manager actor logits from latent
-#         # TODO: Director has a .sample()
-#         skill = agent.manager.policy(latent)
-#         # Decode new goal from skill #TODO: Director uses latent as a context
-#         goal = agent.goal_decoder(skill).mode()
-#         # imagine rollout
-#         imagine_rollout["skill"] = skill  # [B, L, 64]
-#         imagine_rollout["goal"] = goal  # [B, L, Z]
-#     # FIXME: Deviating from director implementation
-#     # Get worker action logits from latent and goal and delta
-#     # Input to the worker actor is laent and goal concat # [B, L, 3*Z]
-#     action_logits = agent.worker.actor(torch.cat((latent, goal), dim=-1))
-#     # because finally action is discrete, we need to convert the logits to action distribution
-#     action_dist = torch.distributions.Categorical(logits=action_logits)
+## Policy-step breakdown
+# step = agent.carry["step"]
+# if step % agent.skill_duration == 0:
+#     # Get new skill and goal from the manager
+#     # Get skill: manager actor logits from latent
+#     skill = agent.manager.policy(latent).sample()
+#     # Decode new goal from skill #TODO: Director uses latent as a context
+#     goal = agent.goal_decoder(skill).mode()  # shape: [B, 1, goal_dim]
+# # Input to the worker actor is latent and goal concat # [B, 1, 3*Z]
+# worker_input = torch.cat([latent, goal], dim=-1)  # [B, 1, 3*Z]
+# # Finally generate primitive action distribution
+# action_dist = agent.worker.policy(worker_input)
+# # TODO: Have mechnanism to save the goal for visualization
+# agent.carry["step"] += 1  # everytime the policy step is called
 
 # print(f"skill shape: {skill.shape}")
 # print(f"goal shape: {goal.shape}")
-# print(
-#     f"action logits shape: {action_logits.shape}, action dist shape: {action_dist.probs.shape}"
-# )
+# print(f"action dist shape: {action_dist.probs.shape}")
+
+
+
 
 ## Test GOAL-VAE
-# metrics = agent.train_goal_vae_step(imagine_rollout)
-# print(f"\n\nMetrics after training: {metrics}")
+metrics = agent.train_goal_vae_step(imagine_rollout)
+print(f"\n\nMetrics after training: {metrics}")
 
 
 ## Breakdown of train_goal_vae_step
@@ -136,33 +156,33 @@ print(f"Sampled action shape: {sampled_action.shape}")
 #     print(f"{k}: {v.shape}")
 
 
-# ## Train Manger Worker
-# imagine_rollout["reward_extr"] = agent.extr_reward(imagine_rollout)
-# imagine_rollout["reward_expl"] = agent.explr_reward(imagine_rollout)
-# imagine_rollout["reward_goal"] = agent.goal_reward(imagine_rollout)
+## Train Manger Worker
+imagine_rollout["reward_extr"] = agent.extr_reward(imagine_rollout)
+imagine_rollout["reward_expl"] = agent.explr_reward(imagine_rollout)
+imagine_rollout["reward_goal"] = agent.goal_reward(imagine_rollout)
 # imagine_rollout["delta"] = imagine_rollout["goal"] - imagine_rollout["sample"]
-# # print("\nTrajectory Shapes->")
-# # for k, v in imagine_rollout.items():
-# #     print(f"{k}: {v.shape}")
+# print("\nTrajectory Shapes->")
+# for k, v in imagine_rollout.items():
+#     print(f"{k}: {v.shape}")
 
-# ## Test manager trajectory
+## Test manager trajectory
 # manager_trajectory = agent.manager_traj(imagine_rollout)
 # print("\n\nManager Trajectory Shapes->")
 # for k, v in manager_trajectory.items():
 #     print(f"{k}: {v.shape}")
 """
 Manager Trajectory Shapes->
-hidden: torch.Size([3, 3, 32])
-sample: torch.Size([3, 3, 32])
-action: torch.Size([3, 3, 64])
-termination: torch.Size([3, 3])
-goal: torch.Size([3, 3, 32])
+hidden: torch.Size([3, 2, 32])
+sample: torch.Size([3, 2, 32])
+action: torch.Size([3, 2, 8, 8])
+termination: torch.Size([3, 2])
+
 reward_extr: torch.Size([3, 2])
 reward_expl: torch.Size([3, 2])
 reward_goal: torch.Size([3, 2])
-delta: torch.Size([3, 3, 32])
-cont: torch.Size([3, 3])
-weight: torch.Size([3, 3])
+
+cont: torch.Size([3, 2])
+weight: torch.Size([3, 2])
 """
 # ## Breakdown of manager_traj
 # traj = imagine_rollout.copy()
@@ -212,18 +232,20 @@ weight: torch.Size([3, 3])
 #     print(f"{k}: {v.shape}")
 """
 Worker Trajectory Shapes->
-hidden: torch.Size([6, 9, 32])
-sample: torch.Size([6, 9, 32])
-action: torch.Size([6, 9])
-termination: torch.Size([6, 9])
-goal: torch.Size([6, 9, 32])
-skill: torch.Size([6, 9, 64])
+hidden: torch.Size([6, 8, 32])
+sample: torch.Size([6, 8, 32])
+action: torch.Size([6, 8])
+termination: torch.Size([6, 8])
+cont: torch.Size([6, 8])
+
+goal: torch.Size([6, 8, 32])
+
 reward_extr: torch.Size([6, 8])
 reward_expl: torch.Size([6, 8])
 reward_goal: torch.Size([6, 8])
-delta: torch.Size([6, 9, 32])
-cont: torch.Size([6, 9])
-weight: torch.Size([6, 9])
+
+
+weight: torch.Size([6, 8])
 """
 
 ## Breakdown
@@ -280,14 +302,108 @@ weight: torch.Size([6, 9])
 # for key, value in traj.items():
 #     print(f"{key}: {value.shape}")
 
+metrics = {}
+## generate the manager and worker trajectories
+manager_traj = agent.manager_traj(imagine_rollout)
+worker_traj = agent.worker_traj(imagine_rollout)
+
+## Train the worker
+mets = agent.worker.update(worker_traj)
+metrics.update({f"worker_{k}": v for k, v in mets.items()})
+## Train the manager
+mets = agent.manager.update(manager_traj)
+metrics.update({f"manager_{k}": v for k, v in mets.items()})
+print(f"\n\nMetrics after training: {metrics}")
+
+
+## Manger Update breakdown
+# traj = manager_traj
 # metrics = {}
-# # generate the manager and worker trajectories
-# manager_traj = agent.manager_traj(imagine_rollout)
-# worker_traj = agent.worker_traj(imagine_rollout)
-# # Train the manager and worker
-# mets = agent.worker.update(worker_traj)
-# metrics.update({f"worker_{k}": v for k, v in mets.items()})
-# mets = agent.manager.update(manager_traj)
-# metrics.update({f"manager_{k}": v for k, v in mets.items()})
-# print(f"\n\nMetrics after training: {metrics}")
-#
+# # All have the shape [B, L, *]
+# hidden = traj["hidden"]  # The hidden state from WM
+# sample = traj["sample"]  # The sample from WM
+# # reward = imagine_rollout["reward"]
+# action = traj["action"]  # [B, L]
+# # cont = imagine_rollout["cont"]
+# termination = traj["termination"]
+# goal = traj.get("goal", None)
+# if goal is not None:
+#     # for the case of worker the goal is also part of latent
+#     latent = torch.cat((hidden, sample, goal), dim=-1)  # [B, L, 3*]
+# else:
+#     latent = torch.cat((hidden, sample), dim=-1)  # [B, L, 2*]
+# action_dist = agent.manager.policy(latent)
+# # get the log prob of the actual action
+# # Expects action to have values between 0 and action_dim-1
+# log_prob = action_dist.log_prob(action)  # [B, L, K]
+# total_critic_loss = 0.0
+# total_value_loss = 0.0
+# total_slow_value_loss = 0.0
+# norm_aqdvantages = []  # TODO: check this logic
+# # Iterate over all critics and calculate values
+# for critic in agent.manager.critics:
+#     # get value for each critic model
+#     raw_value = critic["model"](latent)
+#     value = agent.manager.symlog_twohot_loss.decode(raw_value)
+
+#     # Generate critic reward function specific reward
+#     # reward functions operate on Deter in Director ~ Sample in STORM
+#     reward = traj[critic["reward"]]  # TODO: Check input sample
+#     lambda_return = calc_lambda_return(
+#         reward, value, termination, agent.manager.gamma, agent.manager.lambd
+#     )
+#     # get slow-value for each slow-critic-model
+#     slow_value = agent.manager.get_slow_value(critic["slow_model"], latent)
+#     slow_lambda_return = calc_lambda_return(
+#         reward, slow_value, termination, agent.manager.gamma, agent.manager.lambd
+#     )
+
+#     # update value function with slow critic regularization
+#     value_loss = agent.manager.symlog_twohot_loss(raw_value, lambda_return.detach())
+#     slow_value_regularization_loss = agent.manager.symlog_twohot_loss(
+#         raw_value, slow_lambda_return.detach()
+#     )  # [:, :-1]
+#     # Apply the critic scale as a multiplicative factor
+#     # #TODO: for now the scales are used to scale lossess
+#     scaled_value_loss = critic["scale"] * value_loss
+#     scaled_slow_value_regularization_loss = (
+#         critic["scale"] * slow_value_regularization_loss
+#     )
+#     # update the critic losses
+#     total_value_loss += scaled_value_loss
+#     total_slow_value_loss += scaled_slow_value_regularization_loss
+#     total_critic_loss += (
+#         scaled_value_loss + scaled_slow_value_regularization_loss
+#     )
+
+#     lower_bound = agent.manager.lowerbound_ema(percentile(lambda_return, 0.05))
+#     upper_bound = agent.manager.upperbound_ema(percentile(lambda_return, 0.95))
+#     S = upper_bound - lower_bound
+#     norm_ratio = torch.max(
+#         torch.ones(1), S
+#     )  # max(1, S) in the paper
+#     norm_aqdvantages.append(
+#         (lambda_return - value) / norm_ratio
+#     )  # [:, :-1]
+#     print(f"\nlambda_return, value, norm_ratio: {lambda_return, value, norm_ratio}")
+# # Calcuate the average normed advantage
+# avg_norm_advantage = torch.mean(
+#     torch.stack(norm_aqdvantages), dim=0
+# )  # TODO: Check this logic #Dennis
+# # Calculate Actor related losses
+# if len(log_prob.shape) == 3:
+#     # for manager the log_prob is [B, L, K]
+#     avg_norm_advantage = avg_norm_advantage.unsqueeze(-1)
+# print(f"\n\nAction log probability shape: {log_prob.shape}")
+# print(f"Avg norm advantage shape: {avg_norm_advantage.shape}")
+# policy_loss = -(log_prob * avg_norm_advantage.detach()).mean()
+# entropy_loss = action_dist.entropy().mean()
+# # Calculate total loss
+# loss = policy_loss + total_value_loss - agent.manager.entropy_coef * entropy_loss
+
+
+
+# print(f"\n\nTotal critic loss: {total_critic_loss}")
+# print(f"entropy loss: {entropy_loss}")
+# print(f"Policy loss: {policy_loss}")
+# print(f"Loss: {loss}")
