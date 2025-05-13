@@ -19,9 +19,9 @@ import pickle
 import os
 
 from utils import seed_np_torch, Logger, load_config
-from replay_buffer import ReplayBuffer
+from sub_models.replay_buffer import ReplayBuffer
 import env_wrapper
-import agents
+import sub_models.agents as agents
 from sub_models.functions_losses import symexp
 from sub_models.world_models import WorldModel, MSELoss
 
@@ -276,8 +276,6 @@ def joint_train_world_model_agent(
             (
                 imagine_latent,  # prior_flattened_sample + transformer hidden states
                 agent_action,
-                agent_logprob,  # None
-                agent_value,  # None
                 imagine_reward,
                 imagine_termination,
             ) = world_model_imagine_data(
@@ -295,8 +293,6 @@ def joint_train_world_model_agent(
             agent.update(
                 latent=imagine_latent,
                 action=agent_action,
-                old_logprob=agent_logprob,
-                old_value=agent_value,
                 reward=imagine_reward,
                 termination=imagine_termination,
                 logger=logger,

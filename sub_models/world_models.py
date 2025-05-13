@@ -18,7 +18,7 @@ from sub_models.transformer_model import (
     TEMTransformerKVCache,
 )
 from sub_models.constants import DEVICE, DTYPE_16
-import agents
+import sub_models.agents as agents
 
 
 class EncoderBN(nn.Module):
@@ -489,14 +489,14 @@ class WorldModel(nn.Module):
         self.hidden_buffer[:, 0:1] = last_dist_feat
 
         # imagine
-        for i in range(imagine_batch_length):
+        for i in range(imagine_batch_length):  # len (imagination)/ context_length 16
             action = agent.sample(
                 torch.cat(
                     [
                         self.latent_buffer[:, i : i + 1],
                         self.hidden_buffer[:, i : i + 1],
                     ],
-                    dim=-1,
+                    dim=-1,  # [B, 1, Z+Z]
                 )
             )
             self.action_buffer[:, i : i + 1] = action

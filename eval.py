@@ -18,9 +18,9 @@ import pickle
 import os
 
 from utils import seed_np_torch, Logger, load_config
-from replay_buffer import ReplayBuffer
+from sub_models.replay_buffer import ReplayBuffer
 import env_wrapper
-import agents
+import sub_models.agents as agents
 from sub_models.functions_losses import symexp
 from sub_models.world_models import WorldModel, MSELoss
 from sub_models.constants import DEVICE
