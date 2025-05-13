@@ -8,7 +8,7 @@ from torch.cuda.amp import autocast
 from torchrl.data import AdaptiveKLController
 
 from sub_models.functions_losses import SymLogTwoHotLoss
-from sub_models.utils import MSEDist
+from sub_models.torch_utils import MSEDist
 from utils import EMAScalar
 from sub_models.constants import DEVICE, DTYPE_16
 

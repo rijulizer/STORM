@@ -18,7 +18,9 @@ from sub_models.transformer_model import (
     TEMTransformerKVCache,
 )
 from sub_models.constants import DEVICE, DTYPE_16
-import sub_models.agents as agents
+
+# import sub_models.agents as agents
+from sub_models.director_agents import DirectorAgent
 
 
 class EncoderBN(nn.Module):
@@ -375,6 +377,7 @@ class WorldModel(nn.Module):
     def predict_next(self, last_flattened_sample, action, log_video=True):
         """
         A single step of world model prediction in the imagination phase.
+        For the WM, only sample and action are required to predict the next token.
         """
         with torch.autocast(
             device_type=DEVICE.type, dtype=DTYPE_16, enabled=self.use_amp
@@ -422,39 +425,39 @@ class WorldModel(nn.Module):
         This can slightly improve the efficiency of imagine_data
         But may vary across different machines
         """
-        if (
-            self.imagine_batch_size != imagine_batch_size
-            or self.imagine_batch_length != imagine_batch_length
-        ):
-            print(
-                f"init_imagine_buffer: {imagine_batch_size}x{imagine_batch_length}@{dtype}"
-            )
-            self.imagine_batch_size = imagine_batch_size
-            self.imagine_batch_length = imagine_batch_length
-            latent_size = (
-                imagine_batch_size,
-                imagine_batch_length + 1,
-                self.stoch_flattened_dim,
-            )
-            hidden_size = (
-                imagine_batch_size,
-                imagine_batch_length + 1,
-                self.transformer_hidden_dim,
-            )
-            scalar_size = (imagine_batch_size, imagine_batch_length)
-            self.latent_buffer = torch.zeros(latent_size, dtype=dtype, device=DEVICE)
-            self.hidden_buffer = torch.zeros(hidden_size, dtype=dtype, device=DEVICE)
-            self.action_buffer = torch.zeros(scalar_size, dtype=dtype, device=DEVICE)
-            self.reward_hat_buffer = torch.zeros(
-                scalar_size, dtype=dtype, device=DEVICE.type
-            )
-            self.termination_hat_buffer = torch.zeros(
-                scalar_size, dtype=dtype, device=DEVICE.type
-            )
+        # if (
+        #     self.imagine_batch_size != imagine_batch_size
+        #     or self.imagine_batch_length != imagine_batch_length
+        # ): # probably not needed
+        print(
+            f"init_imagine_buffer: {imagine_batch_size}x{imagine_batch_length}@{dtype}"
+        )
+        self.B = imagine_batch_size
+        self.L = imagine_batch_length
+
+        # define the size of the buffers
+        sample_size = (self.B, self.L + 1, self.stoch_flattened_dim)
+        hidden_size = (self.B, self.L + 1, self.transformer_hidden_dim)
+        scalar_size = (self.B, self.L)
+        goal_size = (self.B, self.L, self.stoch_flattened_dim)
+        skill_size = (self.B, self.L, 8, 8)  # FIXME: makeit a variable
+
+        # Initiate buffers with zeros
+        self.sample_buffer = torch.zeros(sample_size, dtype=dtype, device=DEVICE)
+        self.hidden_buffer = torch.zeros(hidden_size, dtype=dtype, device=DEVICE)
+        self.action_buffer = torch.zeros(scalar_size, dtype=dtype, device=DEVICE)
+        self.reward_hat_buffer = torch.zeros(
+            scalar_size, dtype=dtype, device=DEVICE.type
+        )
+        self.termination_hat_buffer = torch.zeros(
+            scalar_size, dtype=dtype, device=DEVICE.type
+        )
+        self.goal_buffer = torch.zeros(goal_size, dtype=dtype, device=DEVICE.type)
+        self.skill_buffer = torch.zeros(skill_size, dtype=dtype, device=DEVICE.type)
 
     def imagine_data(
         self,
-        agent: agents.ActorCriticAgent,
+        agent: DirectorAgent,
         sample_obs,
         sample_action,
         imagine_batch_size,
@@ -462,65 +465,65 @@ class WorldModel(nn.Module):
         log_video,
         logger,
     ):
-        self.init_imagine_buffer(
-            imagine_batch_size, imagine_batch_length, dtype=self.tensor_dtype
-        )
+        B = imagine_batch_size
+        L = imagine_batch_length
+        imagine_rollout = {}
+
+        self.init_imagine_buffer(B, L, dtype=self.tensor_dtype)
         obs_hat_list = []
 
-        self.storm_transformer.reset_kv_cache_list(
-            imagine_batch_size, dtype=self.tensor_dtype
-        )
+        self.storm_transformer.reset_kv_cache_list(B, dtype=self.tensor_dtype)
         # context
         context_latent = self.encode_obs(sample_obs)
-        # This loop is where the incremental prediction happens
-        for i in range(sample_obs.shape[1]):  # context_length is sample_obs.shape[1]
+        # initiate the buffer with the first sample
+        for i in range(sample_obs.shape[1]):
             (
                 last_obs_hat,
                 last_reward_hat,
                 last_termination_hat,
-                last_latent,
+                last_flattened_sample,
                 last_dist_feat,
             ) = self.predict_next(
                 context_latent[:, i : i + 1],
                 sample_action[:, i : i + 1],
                 log_video=log_video,
             )
-        self.latent_buffer[:, 0:1] = last_latent
+        self.sample_buffer[:, 0:1] = last_flattened_sample
         self.hidden_buffer[:, 0:1] = last_dist_feat
 
-        # imagine
-        for i in range(imagine_batch_length):  # len (imagination)/ context_length 16
-            action = agent.sample(
-                torch.cat(
-                    [
-                        self.latent_buffer[:, i : i + 1],
-                        self.hidden_buffer[:, i : i + 1],
-                    ],
-                    dim=-1,  # [B, 1, Z+Z]
-                )
+        # Imagine, incrementaly get the next tokens
+        for i in range(L):  # len (imagination)/ context_length 16
+            latent = torch.cat(
+                [
+                    self.sample_buffer[:, i : i + 1],
+                    self.hidden_buffer[:, i : i + 1],
+                ],
+                dim=-1,  # [B, 1, Z+Z]
             )
+            action, goal, skill = agent.sample(latent)
+            # Add action, goal skill to the buffer
             self.action_buffer[:, i : i + 1] = action
+            self.goal_buffer[:, i : i + 1] = goal
+            self.skill_buffer[:, i : i + 1] = skill
 
             (
                 last_obs_hat,
                 last_reward_hat,
                 last_termination_hat,
-                last_latent,  # prior_flattened_sample
-                last_dist_feat,  # transformer hidden states
+                last_flattened_sample,  # S: prior_flattened_sample, Sample
+                last_dist_feat,  # H: transformer hidden states
             ) = self.predict_next(
-                self.latent_buffer[:, i : i + 1],
+                self.sample_buffer[:, i : i + 1],
                 self.action_buffer[:, i : i + 1],
                 log_video=log_video,
             )
             # store variables in the next index
-            self.latent_buffer[:, i + 1 : i + 2] = last_latent
+            self.sample_buffer[:, i + 1 : i + 2] = last_flattened_sample
             self.hidden_buffer[:, i + 1 : i + 2] = last_dist_feat
             self.reward_hat_buffer[:, i : i + 1] = last_reward_hat
             self.termination_hat_buffer[:, i : i + 1] = last_termination_hat
             if log_video:
-                obs_hat_list.append(
-                    last_obs_hat[:: imagine_batch_size // 16]
-                )  # uniform sample vec_env
+                obs_hat_list.append(last_obs_hat[:: B // 16])  # uniform sample vec_env
 
         if log_video:
             logger.log(
@@ -531,20 +534,29 @@ class WorldModel(nn.Module):
                 .detach()
                 .numpy(),
             )
-
-        return (
-            torch.cat([self.latent_buffer, self.hidden_buffer], dim=-1),
-            self.action_buffer,
-            self.reward_hat_buffer,
-            self.termination_hat_buffer,
-        )
+        # return imagine_rollout
+        imagine_rollout = {
+            "sample": self.sample_buffer,
+            "hidden": self.hidden_buffer,
+            "action": self.action_buffer,
+            "reward": self.reward_hat_buffer,
+            "termination": self.termination_hat_buffer,
+            "goal": self.goal_buffer,
+            "skill": self.skill_buffer,
+        }
+        # (torch.cat([self.latent_buffer, self.hidden_buffer], dim=-1),
+        #     self.action_buffer,
+        #     self.reward_hat_buffer,
+        #     self.termination_hat_buffer,
+        # )
+        return imagine_rollout
 
     def update(self, obs, action, reward, termination, logger=None):
         """
         A Single training step of the world model using the observation, action, reward, and termination.
         """
         self.train()
-        batch_size, batch_length = obs.shape[:2]  # B, L
+        L = obs.shape[1]  # B, L
         with torch.autocast(
             device_type=DEVICE.type, dtype=DTYPE_16, enabled=self.use_amp
         ):
@@ -563,7 +575,7 @@ class WorldModel(nn.Module):
 
             # Transformer
             temporal_mask = get_subsequent_mask_with_batch_length(
-                batch_length, device=flattened_sample.contiguous().device
+                L, device=flattened_sample.contiguous().device
             )
             trans_hidden = self.storm_transformer(
                 flattened_sample, action, temporal_mask
