@@ -172,7 +172,9 @@ class ActorCriticAgent(nn.Module):
             device_type=DEVICE.type, dtype=DTYPE_16, enabled=self.use_amp
         ):
             logits, raw_value = self.get_logits_raw_value(latent)
-            dist = distributions.Categorical(logits=logits[:, :-1])
+            dist = distributions.Categorical(
+                logits=logits[:, :-1]
+            )  # FIXME this is not needed anymore as wm.imagine has been changed
             log_prob = dist.log_prob(action)
             entropy = dist.entropy()
 
