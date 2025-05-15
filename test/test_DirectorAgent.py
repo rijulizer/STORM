@@ -4,6 +4,7 @@ import torch.nn.functional as F
 import torch.distributions as distributions
 from sub_models.director_agents import DirectorAgent, percentile, calc_lambda_return
 
+from pprint import pprint
 # Write some sample example cases for GoalEncoder and GoalDecoder
 wm_hidden_dim = 32
 wm_sample_dim = 32
@@ -68,12 +69,13 @@ Actor log probability shape: torch.Size([3, 16, 8])
 
 
 ##Test Policy step function
+print(f"\n\nTest Policy step function-->")
 latent = torch.cat((imagine_rollout["sample"], imagine_rollout["hidden"]), dim=-1)[:, 0:1]
-action_dist, goal, skill = agent.policy_step(latent)
-print(f"\n\nAction distribution shape: {action_dist.sample().shape}")
+action_dist = agent.policy_step(latent)
+print(f"Action distribution shape: {action_dist.sample().shape}")
 print(f"steps after call: {agent.carry["step"]}")
-print(f"skill shape: {skill.shape}")
-print(f"goal shape: {goal.shape}")
+# print(f"skill shape: {skill.shape}")
+# print(f"goal shape: {goal.shape}")
 """
 Action distribution shape: torch.Size([3, 1])
 steps after call: 1
@@ -107,53 +109,9 @@ goal shape: torch.Size([3, 1, 32])
 
 
 ## Test GOAL-VAE
+print("\n\nTest GOAL-VAE-->")
 metrics = agent.train_goal_vae_step(imagine_rollout)
-print(f"\n\nMetrics after training: {metrics}")
-
-
-## Breakdown of train_goal_vae_step
-# metrics = {}
-# agent.goal_encoder.train()
-# agent.goal_decoder.train()
-
-# wm_sample = imagine_rollout["sample"]  # [B, L, Z]
-# B, L = wm_sample.shape[:2]
-# # Forward pass of encoder and decoder
-# # Get encoded distribution
-# encoded_dist = agent.goal_encoder(wm_sample)
-# skill_sample = encoded_dist.sample()
-# # Get decoded distribution
-# decoded_dist = agent.goal_decoder(skill_sample)
-# # Reconstruction loss (negative log-likelihood)
-# recon_loss = -decoded_dist.log_prob(wm_sample.detach())
-# recon_loss = recon_loss.mean(-1)  # [B, L] -> [B]
-
-# # KL divergence
-# kl_loss = torch.distributions.kl_divergence(encoded_dist, agent.skill_prior).mean(
-#     (-2, -1)  # [B, L, K, K] -> [B, L, K] -> [B]
-# )
-# # # during training
-# kl_coef = agent.kl_controller.update(kl_loss.detach())
-# total_loss = (recon_loss + kl_coef * kl_loss).mean()
-
-# # # Backward
-# # # TODO: move the optimizer steps togather in the update function
-# agent.optimizer.zero_grad()
-# total_loss.backward()
-# agent.optimizer.step()
-# print(
-#     f"""\n\nGaol-VAE Shapes-> \nskill_sample: {skill_sample.shape},
-#     \nEncoded dist: {encoded_dist.sample().shape},
-#     \nRecon_loss: {recon_loss.shape},
-#     \nskill_prior: {agent.skill_prior.sample().shape},
-#     \nkl_loss: {kl_loss.shape},
-#     \nkl_coef: {kl_coef},
-#     \ntotal_loss: {total_loss}"""
-# )
-
-# print("\n\nWM Imagine Rollout Shapes->")
-# for k, v in imagine_rollout.items():
-#     print(f"{k}: {v.shape}")
+print(f"Metrics after training: {metrics}")
 
 
 ## Train Manger Worker
@@ -407,3 +365,8 @@ print(f"\n\nMetrics after training: {metrics}")
 # print(f"entropy loss: {entropy_loss}")
 # print(f"Policy loss: {policy_loss}")
 # print(f"Loss: {loss}")
+
+## test main update()
+print("\n\nTest main update()-->")
+final_metrics = agent.update(imagine_rollout) 
+pprint(final_metrics)
