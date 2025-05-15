@@ -4,3 +4,11 @@
 3. Check the distributions GoalEncoder and GoalDecoder and corresponding fitting
     Done
 4. Check Device, backpropagation and optimization related code
+
+5. context_latent.shape, model_context_action.shape, prior_flattened_sample.shape, last_dist_feat.shape
+    (torch.Size([1, 1, 1024]), torch.Size([1, 1]), torch.Size([1, 1, 1024]), torch.Size([1, 1, 512]))
+
+# buffer just holds the data realted to environment;
+when that data is loaded. the WM.imagine_data() function converts the environmental data to latent sample, etc....
+So the agent related data can also be dealt like that. The agent can store goal and skill. 
+Moreoever the stoing is only necesaay withon one contenxt length L

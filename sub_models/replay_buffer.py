@@ -9,15 +9,17 @@ from sub_models.constants import DEVICE, DTYPE_16
 class ReplayBuffer:
     def __init__(
         self,
-        obs_shape,
         num_envs,
+        obs_shape,
+        # agent_goal_shape: int,
+        # agent_skill_shape: tuple,
         max_length=int(1e6),
         warmup_length=1024,
         store_on_gpu=False,
     ):
 
         self.store_on_gpu = store_on_gpu
-        self.flag_goal_skill = True
+        self.flag_goal_skill = False
 
         self.entities = ["obs", "action", "reward", "termination"]
         if self.flag_goal_skill:
@@ -34,6 +36,20 @@ class ReplayBuffer:
                         device=DEVICE,
                         requires_grad=False,
                     )
+                # elif entity == "goal":
+                #     self.buffer[entity] = torch.empty(
+                #         (max_length // num_envs, num_envs, agent_goal_shape),
+                #         dtype=torch.float32,
+                #         device=DEVICE,
+                #         requires_grad=False,
+                #     )
+                # elif entity == "skill":
+                #     self.buffer[entity] = torch.empty(
+                #         (max_length // num_envs, num_envs, *agent_skill_shape),
+                #         dtype=torch.float32,
+                #         device=DEVICE,
+                #         requires_grad=False,
+                #     )
                 else:
                     self.buffer[entity] = torch.empty(
                         (max_length // num_envs, num_envs),
@@ -47,6 +63,16 @@ class ReplayBuffer:
                         (max_length // num_envs, num_envs, *obs_shape),
                         dtype=np.uint8,
                     )
+                # elif entity == "goal":
+                #     self.buffer[entity] = np.empty(
+                #         (max_length // num_envs, num_envs, agent_goal_shape),
+                #         dtype=np.float32,
+                #     )
+                # elif entity == "skill":
+                #     self.buffer[entity] = np.empty(
+                #         (max_length // num_envs, num_envs, *agent_skill_shape),
+                #         dtype=np.float32,
+                #     )
                 else:
                     self.buffer[entity] = np.empty(
                         (max_length // num_envs, num_envs), dtype=np.float32
@@ -78,18 +104,19 @@ class ReplayBuffer:
             self.buffer["termination"][self.last_pointer] = torch.from_numpy(
                 termination
             )
-            if goal is not None:
-                self.buffer["goal"][self.last_pointer] = torch.from_numpy(goal)
-            if skill is not None:
-                self.buffer["skill"][self.last_pointer] = torch.from_numpy(skill)
+            # if goal is not None:
+            #     self.buffer["goal"][self.last_pointer] = goal  # already a tensor
+            # if skill is not None:
+            #     self.buffer["skill"][self.last_pointer] = skill  # already a tensor
         else:
             self.buffer["obs"][self.last_pointer] = obs
             self.buffer["action"][self.last_pointer] = action
             self.buffer["reward"][self.last_pointer] = reward
             self.buffer["termination"][self.last_pointer] = termination
-            if self.flag_goal_skill:
-                self.buffer["goal"][self.last_pointer] = goal
-                self.buffer["skill"][self.last_pointer] = skill
+            # if goal is not None:
+            #     self.buffer["goal"][self.last_pointer] = goal
+            # if skill is not None:
+            #     self.buffer["skill"][self.last_pointer] = skill
 
         if len(self) < self.max_length:
             self.length += 1
