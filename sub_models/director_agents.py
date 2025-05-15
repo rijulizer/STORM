@@ -1,4 +1,4 @@
-import copy
+from copy import deepcopy
 from collections import defaultdict
 import torch
 import torch.nn as nn
@@ -7,8 +7,9 @@ from torch.cuda.amp import autocast
 from torchrl.data import AdaptiveKLController
 
 from sub_models.functions_losses import SymLogTwoHotLoss
-from sub_models.utils import MSEDist, OneHotDist
+from sub_models.torch_utils import MSEDist, OneHotDist
 from utils import EMAScalar
+
 from sub_models.constants import DEVICE, DTYPE_16
 
 
@@ -125,7 +126,7 @@ class BaseAgent(nn.Module):
             )
             # Make a copy of critic for slow critic
             self.critics[idx]["model"] = critic_head
-            self.critics[idx]["slow_model"] = copy.deepcopy(critic_head)
+            self.critics[idx]["slow_model"] = deepcopy(critic_head)
 
         self.lowerbound_ema = EMAScalar(decay=0.99)
         self.upperbound_ema = EMAScalar(decay=0.99)
@@ -305,20 +306,20 @@ class BaseAgent(nn.Module):
 
         self.update_slow_critic()
         # Update metrics
-        metrics["ActorCritic/policy_loss"] = policy_loss.item()
-        metrics["ActorCritic/critic_loss"] = total_critic_loss.item()
-        metrics["ActorCritic/entropy_loss"] = entropy_loss.item()
-        metrics["ActorCritic/S"] = S.item()
-        metrics["ActorCritic/norm_ratio"] = norm_ratio.item()
-        metrics["ActorCritic/total_loss"] = loss.item()
+        metrics["AC/policy_loss"] = policy_loss.item()
+        metrics["AC/critic_loss"] = total_critic_loss.item()
+        metrics["AC/entropy_loss"] = entropy_loss.item()
+        metrics["AC/S"] = S.item()
+        metrics["AC/norm_ratio"] = norm_ratio.item()
+        metrics["AC/total_loss"] = loss.item()
         # Log metrics
         if logger is not None:
-            logger.log("ActorCritic/policy_loss", policy_loss.item())
-            logger.log("ActorCritic/critic_loss", total_critic_loss.item())
-            logger.log("ActorCritic/entropy_loss", entropy_loss.item())
-            logger.log("ActorCritic/S", S.item())
-            logger.log("ActorCritic/norm_ratio", norm_ratio.item())
-            logger.log("ActorCritic/total_loss", loss.item())
+            logger.log("AC/policy_loss", policy_loss.item())
+            logger.log("AC/critic_loss", total_critic_loss.item())
+            logger.log("AC/entropy_loss", entropy_loss.item())
+            logger.log("AC/S", S.item())
+            logger.log("AC/norm_ratio", norm_ratio.item())
+            logger.log("AC/total_loss", loss.item())
 
         return metrics
 
@@ -442,7 +443,7 @@ class DirectorAgent(nn.Module):
         super().__init__()
 
         self.wm_sample_dim = wm_sample_dim
-        self.wm_feat_dim = wm_hidden_dim + wm_sample_dim  # WM latent dim
+        self.wm_feat_dim = wm_sample_dim + wm_hidden_dim  # WM latent dim
         self.skill_duration = 8  # config
         self.skill_shape = (8, 8)  # config
         # self.skill_shape_flatten = self.skill_shape[0] * self.skill_shape[1]
@@ -468,12 +469,15 @@ class DirectorAgent(nn.Module):
             critics=[
                 {"critic": "goal", "scale": 1.0, "reward": "reward_goal"},
             ],
-            input_dim=self.wm_feat_dim + wm_sample_dim,  # goal_dim = wm_sample_dim
+            input_dim=self.wm_feat_dim + self.wm_sample_dim,  # goal_dim = wm_sample_dim
             action_dim=wm_action_dim,
             actor_dist="Categorical",  # TODO: check teh distribution worker
         )
+        vae_params = list(self.goal_encoder.parameters()) + list(
+            self.goal_decoder.parameters()
+        )
         self.optimizer = torch.optim.Adam(
-            self.parameters(), lr=3e-5, eps=1e-5
+            vae_params, lr=3e-5, eps=1e-5
         )  # FIXME: check which params are optimized!
         # Enable scaler based on DEVICE type
         self.use_amp = True
@@ -511,8 +515,8 @@ class DirectorAgent(nn.Module):
         """
         carry = defaultdict(str)
         carry["step"] = 0
-        carry["goal"] = torch.zeros(self.wm_sample_dim)
-        carry["skill"] = torch.zeros(self.skill_shape)
+        carry["goal"] = torch.zeros(1, 1, self.wm_sample_dim)  # [1, 1, Z] B=1, L=1
+        carry["skill"] = torch.zeros(1, 1, *self.skill_shape)
         # carry["action"] = torch.zeros(self.wm_action_dim)
         return carry
 
@@ -557,16 +561,27 @@ class DirectorAgent(nn.Module):
         return reward  # [:, 1:]
 
     @torch.no_grad()
-    def policy_step(self, latent, goal=None):
+    def policy_step(self, latent):  # , goal, skill):
         """
         Hierarchical policy step function. First decides whether to update the goal from the manager.
         Then based on the goal, get the workers action logits. Policy step expects one slice of time dim L=1.
         Args: Latent: The latent state from the world model. cat([sample, hidden]) [B, 1, 2Z]
         Returns:
             action_dist: A torch distribution object for actions.
-            goal: Updated or existing goal.
-            skill: Updated or existing skill.
+            goal: Existing goal.
+            skill: Existing skill.
         """
+        # if goal is None:  # FIXME: Think in this logic, what happens first few rounds
+        #     goal = torch.zeros(latent.shape[0], latent.shape[1], self.wm_sample_dim)
+        # if skill is None:
+        #     skill = torch.zeros(
+        #         latent.shape[0],
+        #         latent.shape[1],
+        #         self.skill_shape[0],
+        #         self.skill_shape[1],
+        #     )
+        goal = self.carry["goal"]  # [B, 1, Z]
+        skill = self.carry["skill"]  # [B, 1, K, K]
         step = self.carry["step"]
         if step % self.skill_duration == 0:
             # Get new skill and goal from the manager
@@ -574,78 +589,141 @@ class DirectorAgent(nn.Module):
             skill = self.manager.policy(latent).sample()
             # Decode new goal from skill #TODO: Director uses latent as a context
             goal = self.goal_decoder(skill).mode()  # shape: [B, 1, goal_dim]
+            self.carry["goal"] = goal
+            self.carry["skill"] = skill
+        else:
+            # Ensure goal's batch size matches latent's batch size
+            # can heppens when fist time latent has batch but if criterion is not met
+            if goal.shape[0] != latent.shape[0] or goal.shape[1] != latent.shape[1]:
+                goal = goal.expand(latent.shape[0], latent.shape[1], -1)
         # Input to the worker actor is latent and goal concat # [B, 1, 3*Z]
-        worker_input = torch.cat([latent, goal], dim=-1)  # [B, 1, 3*Z]
+        worker_input = torch.cat([latent, goal], dim=-1)  # [B, 1, *]
         # Finally generate primitive action distribution
         action_dist = self.worker.policy(worker_input)
         # TODO: Have mechnanism to save the goal for visualization
+        # Update the carry state
         self.carry["step"] += 1  # everytime the policy step is called
 
-        return action_dist, goal, skill
+        return action_dist  # , goal, skill
 
     @torch.no_grad()
     def sample(self, latent, greedy=False):
         """
         Get the action from the Agent's policy distribution using the latent state.
         Based on greedy or sampling.
+        Args:
+            latent: The latent state from the world model. cat([sample, hidden]) [B, 1, *]
+            goal: The Existing goal state from the world model. [B, 1, Z]
+            skill: The Existing skill state from the world model. [B, 1, K, K]
+            greedy: Whether to use greedy sampling or not.
         """
         self.eval()
         with torch.autocast(
             device_type=DEVICE.type, dtype=DTYPE_16, enabled=self.use_amp
         ):
 
-            action_dist, goal, skill = self.policy_step(latent)
+            action_dist = self.policy_step(latent)
             if greedy:
                 action = action_dist.probs.argmax(dim=-1)
             else:
                 action = action_dist.sample()
-        return action, goal, skill
+        return action
 
     def sample_as_env_action(self, latent, greedy=False):
         # This is required to integrate with the train loop.
-        action, _, _ = self.sample(latent, greedy)
+        action = self.sample(latent, greedy)
         return action.detach().cpu().squeeze(-1).numpy()
+        # goal.detach().cpu(),
+        # skill.detach().cpu(),
+
+    # def train_goal_vae_step(self, imagine_rollout: dict):
+    #     """
+    #     Single Training step: the skill encoder and decoder jointly using ELBO-style VAE loss.
+    #     """
+    #     metrics = {}
+    #     self.goal_encoder.train()
+    #     self.goal_decoder.train()
+
+    #     wm_sample = imagine_rollout["sample"]  # [B, L, Z]
+    #     # Forward pass of encoder and decoder
+    #     # Get encoded distribution
+    #     encoded_dist = self.goal_encoder(wm_sample)
+    #     skill_sample = encoded_dist.sample()
+    #     # Get decoded distribution
+    #     decoded_dist = self.goal_decoder(skill_sample)
+    #     # Reconstruction loss (negative log-likelihood)
+    #     recon_loss = -decoded_dist.log_prob(wm_sample.detach())
+    #     recon_loss = recon_loss.mean(-1)  # [B, L] -> [B]
+
+    #     # KL divergence
+    #     # get the kl divergence between the encoded distribution and the skill_prior
+    #     # [B, L] -> [B]
+    #     kl_loss = torch.distributions.kl_divergence(
+    #         encoded_dist, self.skill_prior
+    #     ).mean((-2, -1))
+    #     # during training
+    #     kl_coef = self.kl_controller.update(kl_loss.detach())
+    #     # Average the total loss for the batch
+    #     total_loss = (recon_loss + kl_coef * kl_loss).mean()
+
+    #     # Backward
+    #     # TODO: move the optimizer steps togather in the update function
+    #     self.optimizer.zero_grad()
+    #     total_loss.backward()
+    #     self.optimizer.step()
+
+    #     # Metrics
+    #     metrics["goal_recon_loss"] = recon_loss.mean().item()
+    #     metrics["goal_klloss"] = kl_loss.mean().item()
+    #     metrics["goal_total_loss"] = total_loss.item()
+
+    #     return metrics
 
     def train_goal_vae_step(self, imagine_rollout: dict):
         """
-        Single Training step: the skill encoder and decoder jointly using ELBO-style VAE loss.
+        Train the skill encoder (GoalEncoder) and decoder (GoalDecoder)
+        together using VAE loss (ELBO = Recon + KL), with optimizer step.
         """
         metrics = {}
         self.goal_encoder.train()
         self.goal_decoder.train()
 
         wm_sample = imagine_rollout["sample"]  # [B, L, Z]
-        # Forward pass of encoder and decoder
+
+        # --- Forward pass ---
         # Get encoded distribution
-        encoded_dist = self.goal_encoder(wm_sample)
+        encoded_dist = self.goal_encoder(wm_sample)  # q(z|x)
         skill_sample = encoded_dist.sample()
         # Get decoded distribution
-        decoded_dist = self.goal_decoder(skill_sample)
+        decoded_dist = self.goal_decoder(skill_sample)  # p(x|z)
         # Reconstruction loss (negative log-likelihood)
-        recon_loss = -decoded_dist.log_prob(wm_sample.detach())
-        recon_loss = recon_loss.mean(-1)  # [B, L] -> [B]
-
+        # [B, L] -> [B]
+        recon_loss = -decoded_dist.log_prob(wm_sample.detach()).mean(-1)
         # KL divergence
-        # get the kl divergence between the encoded distribution and the skill_prior
         # [B, L] -> [B]
         kl_loss = torch.distributions.kl_divergence(
             encoded_dist, self.skill_prior
         ).mean((-2, -1))
-        # during training
         kl_coef = self.kl_controller.update(kl_loss.detach())
-        # Average the total loss for the batch
-        total_loss = (recon_loss + kl_coef * kl_loss).mean()
 
-        # Backward
-        # TODO: move the optimizer steps togather in the update function
-        self.optimizer.zero_grad()
-        total_loss.backward()
-        self.optimizer.step()
+        vae_loss = (recon_loss + kl_coef * kl_loss).mean()  # [B] -> scalar
 
-        # Metrics
+        # --- Backward pass for VAE only ---
+        self.optimizer.zero_grad(set_to_none=True)
+        if self.scaler is not None:
+            self.scaler.scale(vae_loss).backward()
+            self.scaler.unscale_(self.optimizer)
+            torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1000.0)
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+        else:
+            vae_loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1000.0)
+            self.optimizer.step()
+        # --- Metrics ---
         metrics["goal_recon_loss"] = recon_loss.mean().item()
-        metrics["goal_klloss"] = kl_loss.mean().item()
-        metrics["goal_total_loss"] = total_loss.item()
+        metrics["goal_kl_loss"] = kl_loss.mean().item()
+        metrics["goal_VAE_loss"] = vae_loss.item()
 
         return metrics
 
@@ -679,7 +757,7 @@ class DirectorAgent(nn.Module):
         Args:
             imagine_rollout: A dictionary containing WM rollout trajectory data.
         """
-        traj = imagine_rollout.copy()
+        traj = deepcopy(imagine_rollout)
         # for manager the action is the skill
         traj["action"] = traj.pop("skill")  # Replace "skill" with "action"
         # also pop the world model reward as its present as extr_reward
@@ -719,7 +797,7 @@ class DirectorAgent(nn.Module):
         Output shape [B*N, K, F*] beacuse for the worker each sub trajectory is
         of len K, so the Batch and N dimensions are flattened into a single dimension.
         """
-        traj = imagine_rollout.copy()
+        traj = deepcopy(imagine_rollout)
         # also pop the world model reward as its present as extr_reward
         traj.pop("reward")
         traj["cont"] = 1 - traj["termination"]
@@ -741,21 +819,49 @@ class DirectorAgent(nn.Module):
         )  # [B*N, K] # example: [0.9, 0.81, 0.729, 0.6561, 0] # discount=0.9
         return traj
 
+    # def update(self, imagine_rollout: dict):
+    #     """
+    #     Update policy and value model
+    #     """
+    #     metrics = {}
+    #     success = lambda rew: (rew[:, -1] > 0.7).float().mean()
+    #     self.train()
+    #     with torch.autocast(
+    #         device_type=DEVICE.type, dtype=DTYPE_16, enabled=self.use_amp
+    #     ):
+    #         # Train goal VAE
+    #         vae_met = self.train_goal_vae_step(imagine_rollout)
+    #         metrics.update(vae_met)
+    #         # Train manager and worker
+    #         traj, mets = self.train_manager_worker(imagine_rollout)
+    #         metrics.update(mets)
+    #         # Log metrics
+    #         metrics["success_manager"] = success(traj["reward_goal"]).item()
+
     def update(self, imagine_rollout: dict):
         """
-        Update policy and value model
+        Performs full update step:
+        - VAE is trained here in DirectorAgent
+        - Manager and Worker are trained separately via their own update() methods
         """
         metrics = {}
         success = lambda rew: (rew[:, -1] > 0.7).float().mean()
+
         self.train()
+
+        # --- Train VAE only (GoalEncoder + GoalDecoder) ---
         with torch.autocast(
             device_type=DEVICE.type, dtype=DTYPE_16, enabled=self.use_amp
         ):
-            # Train goal VAE
-            vae_met = self.train_goal_vae_step(imagine_rollout)
-            metrics.update(vae_met)
-            # Train manager and worker
-            traj, mets = self.train_manager_worker(imagine_rollout)
-            metrics.update(mets)
-            # Log metrics
-            metrics["success_manager"] = success(traj["reward_goal"]).item()
+            vae_metrics = self.train_goal_vae_step(imagine_rollout)
+
+        metrics.update(vae_metrics)
+
+        # --- Train manager and worker independently ---
+        traj, mw_metrics = self.train_manager_worker(imagine_rollout)
+        metrics.update(mw_metrics)
+
+        # --- Success tracking ---
+        metrics["success_manager"] = success(traj["reward_goal"]).item()
+
+        return metrics

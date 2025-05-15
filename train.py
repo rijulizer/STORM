@@ -21,7 +21,9 @@ import os
 from utils import seed_np_torch, Logger, load_config
 from sub_models.replay_buffer import ReplayBuffer
 import env_wrapper
-import sub_models.agents as agents
+
+# import sub_models.agents as agents
+from sub_models.director_agents import DirectorAgent
 from sub_models.functions_losses import symexp
 from sub_models.world_models import WorldModel, MSELoss
 
@@ -79,41 +81,45 @@ def build_agent(conf, action_dim: int):
     """
     Return an agent with the specified configuration
     """
-    return agents.ActorCriticAgent(
-        feat_dim=32 * 32 + conf.Models.WorldModel.TransformerHiddenDim,
-        num_layers=conf.Models.Agent.NumLayers,
-        hidden_dim=conf.Models.Agent.HiddenDim,
-        action_dim=action_dim,
-        gamma=conf.Models.Agent.Gamma,
-        lambd=conf.Models.Agent.Lambda,
-        entropy_coef=conf.Models.Agent.EntropyCoef,
+    return DirectorAgent(
+        conf.Models.WorldModel.TransformerHiddenDim,
+        32 * 32,  # faltten sample dim
+        action_dim,
     ).to(DEVICE)
 
 
-def train_world_model_step(
+def train_world_model(
     replay_buffer: ReplayBuffer,
     world_model: WorldModel,
     batch_size: int,
     demonstration_batch_size,
     batch_length: int,
-    logger,
+    logger=None,
 ):
     """
     Train single step of the world model with the sampled data from replay buffer
     """
     # Sample from replay buffer
-    obs, action, reward, termination = replay_buffer.sample(
+    buffer_sample = replay_buffer.sample(
         batch_size, demonstration_batch_size, batch_length
     )
+    # obs: [B, L, 3, 64, 64], action: [B, L], reward: [B, L], termination: [B, L]
     # Train world model with the sampled data
-    world_model.update(obs, action, reward, termination, logger=logger)
+    metrics = world_model.update(
+        buffer_sample["obs"],
+        buffer_sample["action"],
+        buffer_sample["reward"],
+        buffer_sample["termination"],
+        logger=None,
+    )
+    return metrics
 
 
 @torch.no_grad()
 def world_model_imagine_data(
     replay_buffer: ReplayBuffer,
     world_model: WorldModel,
-    agent: agents.ActorCriticAgent,
+    agent: DirectorAgent,
     imagine_batch_size,
     imagine_demonstration_batch_size,
     imagine_context_length,
@@ -127,30 +133,36 @@ def world_model_imagine_data(
     world_model.eval()
     agent.eval()
 
-    sample_obs, sample_action, sample_reward, sample_termination = replay_buffer.sample(
+    # a dictionary of sampled data from the replay buffer where each key is a tensor
+    buffer_sample = replay_buffer.sample(
         imagine_batch_size, imagine_demonstration_batch_size, imagine_context_length
     )
-    latent, action, reward_hat, termination_hat = world_model.imagine_data(
+    # Buffer sample items:
+    # obs: ([B, L, 3, 64, 64]); action: ([B, L]); reward: ([B, L]); termination: ([B, L])
+
+    imagined_rollout = world_model.imagine_data(
         agent,
-        sample_obs,
-        sample_action,
+        buffer_sample,
         imagine_batch_size=imagine_batch_size + imagine_demonstration_batch_size,
         imagine_batch_length=imagine_batch_length,
         log_video=log_video,
         logger=logger,
     )
-    # latent: prior_flattened_sample + transformer hidden states
-    return latent, action, None, None, reward_hat, termination_hat
+    # Imagine rollout items:
+    # sample: ([B, L+1, 1024]); hidden: ([B, L+1, 512])
+    # action: ([B, L]); reward: ([B, L]); termination: ([B, L])
+    # goal: ([B, L, 1024]); skill: ([B, L, 8, 8])
+    return imagined_rollout
 
 
 def joint_train_world_model_agent(
     env_name: str,
-    max_steps: str,
+    max_steps: int,
     num_envs: int,
     image_size: int,
     replay_buffer: ReplayBuffer,
     world_model: WorldModel,
-    agent: agents.ActorCriticAgent,
+    agent: DirectorAgent,
     train_dynamics_every_steps,
     train_agent_every_steps,
     batch_size,
@@ -165,6 +177,7 @@ def joint_train_world_model_agent(
     logger,
     args,
 ):
+    metrics = {}
     os.makedirs(f"ckpt/{args.exp_name}", exist_ok=True)
     # build vec env, not useful in the Atari100k setting
     # but when the max_steps is large, you can use parallel envs to speed up
@@ -203,12 +216,12 @@ def joint_train_world_model_agent(
                         world_model.calc_last_dist_feat(
                             context_latent, model_context_action
                         )
-                    )
+                    )  # [1,1,1024], [1,1,512]
                     action = agent.sample_as_env_action(
                         torch.cat([prior_flattened_sample, last_dist_feat], dim=-1),
                         greedy=False,
                     )
-            # [B, H, W, C] -> [B, 1, C, H, W]
+            # [B, H, W, C] -> [B, 1, C, H, W] # B=1
             context_obs.append(
                 torch.permute(
                     torch.tensor(current_obs, device=DEVICE), (0, 3, 1, 2)
@@ -217,10 +230,11 @@ def joint_train_world_model_agent(
             )
             context_action.append(action)
         else:
-            # simply sample random action
+            # sample single random action
             action = vec_env.action_space.sample()
 
         # Perform action in the env and observe the next state, reward, done, truncated
+        # Single Unbatched instances: ((1, 64, 64, 3), (1,), (1,), (1,), (1,))
         obs, reward, done, truncated, info = vec_env.step(action)
 
         # Append the transition to the replay buffer
@@ -232,87 +246,88 @@ def joint_train_world_model_agent(
         if done_flag.any():  # end of episode
             for i in range(num_envs):
                 if done_flag[i]:
-                    logger.log(f"sample/{env_name}_reward", sum_reward[i])
-                    logger.log(
-                        f"sample/{env_name}_episode_steps",
-                        current_info["episode_frame_number"][i] // 4,
+                    # logger.log(f"sample/{env_name}_reward", sum_reward[i])
+                    # logger.log(
+                    #     f"sample/{env_name}_episode_steps",
+                    #     current_info["episode_frame_number"][i] // 4,
+                    # )  # framskip=4
+                    # logger.log("replay_buffer/length", len(replay_buffer))
+                    # sum_reward[i] = 0
+                    metrics[f"sample/{env_name}_reward"] = sum_reward[i]
+                    metrics[f"sample/{env_name}_episode_steps"] = (
+                        current_info["episode_frame_number"][i] // 4
                     )  # framskip=4
-                    logger.log("replay_buffer/length", len(replay_buffer))
+                    metrics["replay_buffer/length"] = len(replay_buffer)
                     sum_reward[i] = 0
 
         # Update current_obs, current_info and sum_reward
         sum_reward += reward
         current_obs = obs
         current_info = info
-        # <<< sample part
+        # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<< sample part
 
-        # Train world model part >>>
+        # Train world model part >>>>>>>>>>>>>>>>>>>>>>>>>>>>>
         if (
             replay_buffer.ready
             and total_steps % (train_dynamics_every_steps // num_envs) == 0
         ):
-            train_world_model_step(
+            print("Training World Model...")
+            wm_train_metrics = train_world_model(
                 replay_buffer=replay_buffer,
                 world_model=world_model,
                 batch_size=batch_size,
                 demonstration_batch_size=demonstration_batch_size,
                 batch_length=batch_length,
-                logger=logger,
+                # logger=logger,
             )
-        # <<< Train world model part
+            # update metrics
+            metrics.update(wm_train_metrics)
+        # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<< Train world model part
 
-        # Train agent part >>>
-        # print("Training Agent...")
+        # Train agent on WM imagined data >>>>>>>>>>>>>>>>>>>>>>>>>>>
         if (
             replay_buffer.ready
             and total_steps % (train_agent_every_steps // num_envs) == 0
             and total_steps * num_envs >= 0
         ):
+            print("Training Agent...")
             if total_steps % (save_every_steps // num_envs) == 0:
                 log_video = True
             else:
                 log_video = False
-
-            (
-                imagine_latent,  # prior_flattened_sample + transformer hidden states
-                agent_action,
-                imagine_reward,
-                imagine_termination,
-            ) = world_model_imagine_data(
-                replay_buffer=replay_buffer,
-                world_model=world_model,
-                agent=agent,
-                imagine_batch_size=imagine_batch_size,
-                imagine_demonstration_batch_size=imagine_demonstration_batch_size,
-                imagine_context_length=imagine_context_length,
-                imagine_batch_length=imagine_batch_length,
-                log_video=log_video,
-                logger=logger,
+            # Generate imagined rollout data
+            imagine_rollout = world_model_imagine_data(
+                replay_buffer,
+                world_model,
+                agent,
+                imagine_batch_size,
+                imagine_demonstration_batch_size,
+                imagine_context_length,
+                imagine_batch_length,
+                log_video,
+                logger,
             )
             # Update agent with imagined data
-            agent.update(
-                latent=imagine_latent,
-                action=agent_action,
-                reward=imagine_reward,
-                termination=imagine_termination,
-                logger=logger,
-            )
-        # <<< Train agent part
+            agent_metrics = agent.update(imagine_rollout)
+            # update metrics
+            metrics.update(agent_metrics)
+        # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<< Train agent part
 
         # save model per episode
-        if total_steps % (save_every_steps // num_envs) == 0:
-            print(
-                colorama.Fore.GREEN
-                + f"Saving model at total steps {total_steps}"
-                + colorama.Style.RESET_ALL
-            )
-            torch.save(
-                world_model.state_dict(),
-                f"ckpt/{args.exp_name}/world_model_{total_steps}.pth",
-            )
-            torch.save(
-                agent.state_dict(), f"ckpt/{args.exp_name}/agent_{total_steps}.pth"
-            )
+        # if total_steps % (save_every_steps // num_envs) == 0:
+        #     print(
+        #         colorama.Fore.GREEN
+        #         + f"Saving model at total steps {total_steps}"
+        #         + colorama.Style.RESET_ALL
+        #     )
+        #     torch.save(
+        #         world_model.state_dict(),
+        #         f"ckpt/{args.exp_name}/world_model_{total_steps}.pth",
+        #     )
+        #     torch.save(
+        #         agent.state_dict(), f"ckpt/{args.exp_name}/agent_{total_steps}.pth"
+        #     )
+    return metrics
 
 
 if __name__ == "__main__":

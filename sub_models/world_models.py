@@ -282,7 +282,7 @@ class WorldModel(nn.Module):
         self.final_feature_width = 4
         self.stoch_dim = 32
         self.stoch_flattened_dim = self.stoch_dim * self.stoch_dim
-        self.use_amp = True
+        self.use_amp = False  # FIXME: True
         self.tensor_dtype = torch.float16 if self.use_amp else torch.float32
         self.imagine_batch_size = -1
         self.imagine_batch_length = -1
@@ -293,7 +293,7 @@ class WorldModel(nn.Module):
             stem_channels=32,
             final_feature_width=self.final_feature_width,
         )
-        self.storm_transformer = TEMTransformerKVCache(
+        self.storm_transformer = StochasticTransformerKVCache(
             stoch_dim=self.stoch_flattened_dim,
             action_dim=action_dim,
             feat_dim=transformer_hidden_dim,
@@ -458,8 +458,7 @@ class WorldModel(nn.Module):
     def imagine_data(
         self,
         agent: DirectorAgent,
-        sample_obs,
-        sample_action,
+        buffer_sample,
         imagine_batch_size,
         imagine_batch_length,
         log_video,
@@ -474,9 +473,9 @@ class WorldModel(nn.Module):
 
         self.storm_transformer.reset_kv_cache_list(B, dtype=self.tensor_dtype)
         # context
-        context_latent = self.encode_obs(sample_obs)
+        context_latent = self.encode_obs(buffer_sample["obs"])
         # initiate the buffer with the first sample
-        for i in range(sample_obs.shape[1]):
+        for i in range(buffer_sample["obs"].shape[1]):
             (
                 last_obs_hat,
                 last_reward_hat,
@@ -485,7 +484,7 @@ class WorldModel(nn.Module):
                 last_dist_feat,
             ) = self.predict_next(
                 context_latent[:, i : i + 1],
-                sample_action[:, i : i + 1],
+                buffer_sample["action"][:, i : i + 1],
                 log_video=log_video,
             )
         self.sample_buffer[:, 0:1] = last_flattened_sample
@@ -500,11 +499,16 @@ class WorldModel(nn.Module):
                 ],
                 dim=-1,  # [B, 1, Z+Z]
             )
-            action, goal, skill = agent.sample(latent)
+            # # load goal from the r
+            # exist_goal = buffer_sample["goal"][:, i : i + 1]
+            # exist_skill = buffer_sample["skill"][:, i : i + 1]
+
+            action = agent.sample(latent)  # , exist_goal, exist_skill)
             # Add action, goal skill to the buffer
             self.action_buffer[:, i : i + 1] = action
-            self.goal_buffer[:, i : i + 1] = goal
-            self.skill_buffer[:, i : i + 1] = skill
+            # TODO: check if needed
+            self.goal_buffer[:, i : i + 1] = agent.carry["goal"]
+            self.skill_buffer[:, i : i + 1] = agent.carry["skill"]
 
             (
                 last_obs_hat,
@@ -534,6 +538,10 @@ class WorldModel(nn.Module):
                 .detach()
                 .numpy(),
             )
+        # ensure the last token is removed to make the length of the buffer same
+        # [B, L+1, C] -> [B, L, C]
+        self.sample_buffer = self.sample_buffer[:, 0:L]  # remove the last token
+        self.hidden_buffer = self.hidden_buffer[:, 0:L]
         # return imagine_rollout
         imagine_rollout = {
             "sample": self.sample_buffer,
@@ -544,17 +552,13 @@ class WorldModel(nn.Module):
             "goal": self.goal_buffer,
             "skill": self.skill_buffer,
         }
-        # (torch.cat([self.latent_buffer, self.hidden_buffer], dim=-1),
-        #     self.action_buffer,
-        #     self.reward_hat_buffer,
-        #     self.termination_hat_buffer,
-        # )
         return imagine_rollout
 
     def update(self, obs, action, reward, termination, logger=None):
         """
         A Single training step of the world model using the observation, action, reward, and termination.
         """
+        metrics = {}
         self.train()
         L = obs.shape[1]  # B, L
         with torch.autocast(
@@ -634,3 +638,14 @@ class WorldModel(nn.Module):
                 representation_real_kl_div.item(),
             )
             logger.log("WorldModel/total_loss", total_loss.item())
+            metrics = {
+                "WM/reconstruction_loss": reconstruction_loss.item(),
+                "WM/reward_loss": reward_loss.item(),
+                "WM/termination_loss": termination_loss.item(),
+                "WM/dynamics_loss": dynamics_loss.item(),
+                "WM/dynamics_real_kl_div": dynamics_real_kl_div.item(),
+                "WM/representation_loss": representation_loss.item(),
+                "WM/representation_real_kl_div": representation_real_kl_div.item(),
+                "WM/total_loss": total_loss.item(),
+            }
+        return metrics
