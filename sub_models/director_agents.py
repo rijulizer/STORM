@@ -449,13 +449,6 @@ class DirectorAgent(nn.Module):
         # self.skill_shape_flatten = self.skill_shape[0] * self.skill_shape[1]
         self.goal_encoder = GoalEncoder(self.wm_sample_dim, self.skill_shape)
         self.goal_decoder = GoalDecoder(self.skill_shape, self.wm_sample_dim)
-
-        self.skill_prior = self.get_skill_prior()
-        self.discount = 0.99  # config
-        self.kl_controller = AdaptiveKLController(
-            init_kl_coef=0.0, target=10.0, horizon=100
-        )  # config
-        self.carry = self.initiate_carry()
         self.manager = BaseAgent(
             [  # Manager gets only external WM reward and exploration reward
                 {"critic": "extr", "scale": 1.0, "reward": "reward_extr"},
@@ -473,6 +466,14 @@ class DirectorAgent(nn.Module):
             action_dim=wm_action_dim,
             actor_dist="Categorical",  # TODO: check teh distribution worker
         )
+        self.skill_prior = self.get_skill_prior()
+        self.discount = 0.99  # config
+        self.kl_controller = AdaptiveKLController(
+            init_kl_coef=0.0, target=10.0, horizon=100
+        )  # config
+        self.initiate_carry()
+        # director module only trains the goal encoder and decoder
+        # manager and worker are trained using the base agent update function
         vae_params = list(self.goal_encoder.parameters()) + list(
             self.goal_decoder.parameters()
         )
@@ -513,12 +514,11 @@ class DirectorAgent(nn.Module):
         Initialize the internal carry states of director agent.
         Holds entities like- goal, skill, step etc.
         """
-        carry = defaultdict(str)
-        carry["step"] = 0
-        carry["goal"] = torch.zeros(1, 1, self.wm_sample_dim)  # [1, 1, Z] B=1, L=1
-        carry["skill"] = torch.zeros(1, 1, *self.skill_shape)
+        self.carry = defaultdict(str)
+        self.carry["step"] = 0
+        self.carry["goal"] = torch.zeros(1, 1, self.wm_sample_dim)  # [1, 1, Z] B=1, L=1
+        self.carry["skill"] = torch.zeros(1, 1, *self.skill_shape)
         # carry["action"] = torch.zeros(self.wm_action_dim)
-        return carry
 
     @torch.no_grad()
     def extr_reward(self, imagine_rollout):
@@ -594,10 +594,25 @@ class DirectorAgent(nn.Module):
         else:
             # Ensure goal's batch size matches latent's batch size
             # can heppens when fist time latent has batch but if criterion is not met
-            if goal.shape[0] != latent.shape[0] or goal.shape[1] != latent.shape[1]:
-                goal = goal.expand(latent.shape[0], latent.shape[1], -1)
+            try:
+                if goal.shape[0] != latent.shape[0] or goal.shape[1] != latent.shape[1]:
+                    goal = goal.expand(latent.shape[0], latent.shape[1], -1)
+            except RuntimeError as e:
+                print(f"Error in concatenating latent and goal: {e}.")
+                print(
+                    f"Latent shape: {latent.shape}, Goal shape: {goal.shape}, step: {step}"
+                )
+                raise e
         # Input to the worker actor is latent and goal concat # [B, 1, 3*Z]
-        worker_input = torch.cat([latent, goal], dim=-1)  # [B, 1, *]
+        try:
+            worker_input = torch.cat([latent, goal], dim=-1)  # [B, 1, *]
+        except RuntimeError as e:
+            print(f"Error in concatenating latent and goal: {e}.")
+            print(
+                f"Latent shape: {latent.shape}, Goal shape: {goal.shape}, step: {step}"
+            )
+            raise e
+
         # Finally generate primitive action distribution
         action_dist = self.worker.policy(worker_input)
         # TODO: Have mechnanism to save the goal for visualization
@@ -633,8 +648,6 @@ class DirectorAgent(nn.Module):
         # This is required to integrate with the train loop.
         action = self.sample(latent, greedy)
         return action.detach().cpu().squeeze(-1).numpy()
-        # goal.detach().cpu(),
-        # skill.detach().cpu(),
 
     # def train_goal_vae_step(self, imagine_rollout: dict):
     #     """

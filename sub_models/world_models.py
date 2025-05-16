@@ -489,7 +489,10 @@ class WorldModel(nn.Module):
             )
         self.sample_buffer[:, 0:1] = last_flattened_sample
         self.hidden_buffer[:, 0:1] = last_dist_feat
-
+        if agent.__class__.__name__ == "DirectorAgent":
+            # Agent needs to refresh carry in the loop L
+            # Goal and skill from a differenet batch wont make sense
+            agent.initiate_carry()
         # Imagine, incrementaly get the next tokens
         for i in range(L):  # len (imagination)/ context_length 16
             latent = torch.cat(
@@ -506,9 +509,12 @@ class WorldModel(nn.Module):
             action = agent.sample(latent)  # , exist_goal, exist_skill)
             # Add action, goal skill to the buffer
             self.action_buffer[:, i : i + 1] = action
-            # TODO: check if needed
-            self.goal_buffer[:, i : i + 1] = agent.carry["goal"]
-            self.skill_buffer[:, i : i + 1] = agent.carry["skill"]
+            if agent.__class__.__name__ == "DirectorAgent":
+                self.goal_buffer[:, i : i + 1] = agent.carry["goal"]
+                self.skill_buffer[:, i : i + 1] = agent.carry["skill"]
+            else:
+                self.goal_buffer = None
+                self.skill_buffer = None
 
             (
                 last_obs_hat,
