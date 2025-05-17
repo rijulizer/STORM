@@ -125,7 +125,7 @@ def world_model_imagine_data(
     imagine_context_length,
     imagine_batch_length,
     log_video,
-    logger,
+    logger=None,
 ):
     """
     Sample context from replay buffer, then imagine data with world model and agent
@@ -291,10 +291,10 @@ def joint_train_world_model_agent(
             and total_steps * num_envs >= 0
         ):
             print("Training Agent...")
-            if total_steps % (save_every_steps // num_envs) == 0:
-                log_video = True
-            else:
-                log_video = False
+            # if total_steps % (save_every_steps // num_envs) == 0:
+            #     log_video = True
+            # else:
+            log_video = False
             # Generate imagined rollout data
             imagine_rollout = world_model_imagine_data(
                 replay_buffer,
@@ -305,28 +305,31 @@ def joint_train_world_model_agent(
                 imagine_context_length,
                 imagine_batch_length,
                 log_video,
-                logger,
+                # logger,
             )
             # Update agent with imagined data
             agent_metrics = agent.update(imagine_rollout)
             # update metrics
             metrics.update(agent_metrics)
         # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<< Train agent part
-
+        # Update logs
+        if logger is not None:
+            for key, value in metrics.items():
+                logger.log(key, value)
         # save model per episode
-        # if total_steps % (save_every_steps // num_envs) == 0:
-        #     print(
-        #         colorama.Fore.GREEN
-        #         + f"Saving model at total steps {total_steps}"
-        #         + colorama.Style.RESET_ALL
-        #     )
-        #     torch.save(
-        #         world_model.state_dict(),
-        #         f"ckpt/{args.exp_name}/world_model_{total_steps}.pth",
-        #     )
-        #     torch.save(
-        #         agent.state_dict(), f"ckpt/{args.exp_name}/agent_{total_steps}.pth"
-        #     )
+        if total_steps % (save_every_steps // num_envs) == 0:
+            print(
+                colorama.Fore.GREEN
+                + f"Saving model at total steps {total_steps}"
+                + colorama.Style.RESET_ALL
+            )
+            torch.save(
+                world_model.state_dict(),
+                f"ckpt/{args.exp_name}/world_model_{total_steps}.pth",
+            )
+            torch.save(
+                agent.state_dict(), f"ckpt/{args.exp_name}/agent_{total_steps}.pth"
+            )
     return metrics
 
 

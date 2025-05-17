@@ -462,7 +462,7 @@ class WorldModel(nn.Module):
         imagine_batch_size,
         imagine_batch_length,
         log_video,
-        logger,
+        logger=None,
     ):
         B = imagine_batch_size
         L = imagine_batch_length
@@ -644,14 +644,14 @@ class WorldModel(nn.Module):
                 representation_real_kl_div.item(),
             )
             logger.log("WorldModel/total_loss", total_loss.item())
-            metrics = {
-                "WM/reconstruction_loss": reconstruction_loss.item(),
-                "WM/reward_loss": reward_loss.item(),
-                "WM/termination_loss": termination_loss.item(),
-                "WM/dynamics_loss": dynamics_loss.item(),
-                "WM/dynamics_real_kl_div": dynamics_real_kl_div.item(),
-                "WM/representation_loss": representation_loss.item(),
-                "WM/representation_real_kl_div": representation_real_kl_div.item(),
-                "WM/total_loss": total_loss.item(),
-            }
+        metrics = {
+            "WM/reconstruction_loss": reconstruction_loss.item(),
+            "WM/reward_loss": reward_loss.item(),
+            "WM/termination_loss": termination_loss.item(),
+            "WM/dynamics_loss": dynamics_loss.item(),
+            "WM/dynamics_real_kl_div": dynamics_real_kl_div.item(),
+            "WM/representation_loss": representation_loss.item(),
+            "WM/representation_real_kl_div": representation_real_kl_div.item(),
+            "WM/total_loss": total_loss.item(),
+        }
         return metrics

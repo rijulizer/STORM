@@ -487,7 +487,6 @@ class DirectorAgent(nn.Module):
             if DEVICE.type == "cuda"
             else None
         )
-        self.metrics = {}
 
     def get_skill_prior(self):
         """
@@ -649,49 +648,6 @@ class DirectorAgent(nn.Module):
         action = self.sample(latent, greedy)
         return action.detach().cpu().squeeze(-1).numpy()
 
-    # def train_goal_vae_step(self, imagine_rollout: dict):
-    #     """
-    #     Single Training step: the skill encoder and decoder jointly using ELBO-style VAE loss.
-    #     """
-    #     metrics = {}
-    #     self.goal_encoder.train()
-    #     self.goal_decoder.train()
-
-    #     wm_sample = imagine_rollout["sample"]  # [B, L, Z]
-    #     # Forward pass of encoder and decoder
-    #     # Get encoded distribution
-    #     encoded_dist = self.goal_encoder(wm_sample)
-    #     skill_sample = encoded_dist.sample()
-    #     # Get decoded distribution
-    #     decoded_dist = self.goal_decoder(skill_sample)
-    #     # Reconstruction loss (negative log-likelihood)
-    #     recon_loss = -decoded_dist.log_prob(wm_sample.detach())
-    #     recon_loss = recon_loss.mean(-1)  # [B, L] -> [B]
-
-    #     # KL divergence
-    #     # get the kl divergence between the encoded distribution and the skill_prior
-    #     # [B, L] -> [B]
-    #     kl_loss = torch.distributions.kl_divergence(
-    #         encoded_dist, self.skill_prior
-    #     ).mean((-2, -1))
-    #     # during training
-    #     kl_coef = self.kl_controller.update(kl_loss.detach())
-    #     # Average the total loss for the batch
-    #     total_loss = (recon_loss + kl_coef * kl_loss).mean()
-
-    #     # Backward
-    #     # TODO: move the optimizer steps togather in the update function
-    #     self.optimizer.zero_grad()
-    #     total_loss.backward()
-    #     self.optimizer.step()
-
-    #     # Metrics
-    #     metrics["goal_recon_loss"] = recon_loss.mean().item()
-    #     metrics["goal_klloss"] = kl_loss.mean().item()
-    #     metrics["goal_total_loss"] = total_loss.item()
-
-    #     return metrics
-
     def train_goal_vae_step(self, imagine_rollout: dict):
         """
         Train the skill encoder (GoalEncoder) and decoder (GoalDecoder)
@@ -734,9 +690,9 @@ class DirectorAgent(nn.Module):
             torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1000.0)
             self.optimizer.step()
         # --- Metrics ---
-        metrics["goal_recon_loss"] = recon_loss.mean().item()
-        metrics["goal_kl_loss"] = kl_loss.mean().item()
-        metrics["goal_VAE_loss"] = vae_loss.item()
+        metrics["Director/goal_recon_loss"] = recon_loss.mean().item()
+        metrics["Director/goal_kl_loss"] = kl_loss.mean().item()
+        metrics["Director/goal_VAE_loss"] = vae_loss.item()
 
         return metrics
 
@@ -757,9 +713,9 @@ class DirectorAgent(nn.Module):
         worker_traj = self.worker_traj(imagine_rollout)
         # Train the manager and worker
         mets = self.worker.update(worker_traj)
-        metrics.update({f"worker_{k}": v for k, v in mets.items()})
+        metrics.update({f"Worker_{k}": v for k, v in mets.items()})
         mets = self.manager.update(manager_traj)
-        metrics.update({f"manager_{k}": v for k, v in mets.items()})
+        metrics.update({f"Manager_{k}": v for k, v in mets.items()})
         return imagine_rollout, metrics
 
     def manager_traj(self, imagine_rollout: dict) -> dict:
@@ -832,25 +788,6 @@ class DirectorAgent(nn.Module):
         )  # [B*N, K] # example: [0.9, 0.81, 0.729, 0.6561, 0] # discount=0.9
         return traj
 
-    # def update(self, imagine_rollout: dict):
-    #     """
-    #     Update policy and value model
-    #     """
-    #     metrics = {}
-    #     success = lambda rew: (rew[:, -1] > 0.7).float().mean()
-    #     self.train()
-    #     with torch.autocast(
-    #         device_type=DEVICE.type, dtype=DTYPE_16, enabled=self.use_amp
-    #     ):
-    #         # Train goal VAE
-    #         vae_met = self.train_goal_vae_step(imagine_rollout)
-    #         metrics.update(vae_met)
-    #         # Train manager and worker
-    #         traj, mets = self.train_manager_worker(imagine_rollout)
-    #         metrics.update(mets)
-    #         # Log metrics
-    #         metrics["success_manager"] = success(traj["reward_goal"]).item()
-
     def update(self, imagine_rollout: dict):
         """
         Performs full update step:
@@ -875,6 +812,6 @@ class DirectorAgent(nn.Module):
         metrics.update(mw_metrics)
 
         # --- Success tracking ---
-        metrics["success_manager"] = success(traj["reward_goal"]).item()
+        metrics["Director/success_manager"] = success(traj["reward_goal"]).item()
 
         return metrics
