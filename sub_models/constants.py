@@ -5,6 +5,6 @@ DEVICE = torch.device(
     if torch.backends.mps.is_available()
     else ("cuda:1" if torch.cuda.is_available() else "cpu")
 )
-DEVICE = torch.device("cpu")  # FIXME: hard code for now
 # DEVICE = torch.device("cpu")
+
 DTYPE_16 = torch.float16 if DEVICE.type == "mps" else torch.bfloat16

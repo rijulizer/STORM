@@ -3,8 +3,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.distributions as distributions
 from sub_models.director_agents import DirectorAgent, percentile, calc_lambda_return
+from sub_models.constants import DEVICE, DTYPE_16
 
 from pprint import pprint
+
 # Write some sample example cases for GoalEncoder and GoalDecoder
 wm_hidden_dim = 32
 wm_sample_dim = 32
@@ -29,21 +31,28 @@ imagine_rollout = {
     "goal": wm_sample,
     "skill": skill,
 }
+# Send each tensor to the device
+for k, v in imagine_rollout.items():
+    if isinstance(v, torch.Tensor):
+        # Check if the tensor is already on the device
+        if v.device != DEVICE:
+            # Move the tensor to the specified device
+            imagine_rollout[k] = v.to(DEVICE)
 
 
 ## Define the DirectorAgent
-agent = DirectorAgent(wm_hidden_dim, wm_sample_dim, wm_action_dim)
+agent = DirectorAgent(wm_hidden_dim, wm_sample_dim, wm_action_dim).to(DEVICE)
 
 
 ## Test external reward function
 extr_reward = agent.extr_reward(imagine_rollout)
-print(f"\n\nExternal reward shape: {extr_reward.shape}")
+print(f"\n\nExternal reward shape: {extr_reward.shape, extr_reward.device}")
 ## Test explr_reward function
 explr_reward = agent.explr_reward(imagine_rollout)
-print(f"Exploration reward shape: {explr_reward.shape}")
+print(f"Exploration reward shape: {explr_reward.shape, explr_reward.device}")
 ## Test Goal reward function
 goal_reward = agent.goal_reward(imagine_rollout)
-print(f"Goal reward shape: {goal_reward.shape}")
+print(f"Goal reward shape: {goal_reward.shape, goal_reward.device}")
 """
 External reward shape: torch.Size([3, 16])
 Exploration reward shape: torch.Size([3, 16])
@@ -51,31 +60,14 @@ Goal reward shape: torch.Size([3, 16])
 """
 
 
-## Test Manager
-latent = torch.cat((imagine_rollout["sample"], imagine_rollout["hidden"]), dim=-1)
-actor_logits = agent.manager.actor(latent)
-actor_dist = agent.manager.policy(latent)
-actor_dist_sample = actor_dist.sample()
-actor_log_prob = actor_dist.log_prob(skill)
-print(f"\n\nActor logits shape: {actor_logits.shape}")
-print(f"Actor distribution sample shape: {actor_dist_sample.shape}")
-print(f"Actor log probability shape: {actor_log_prob.shape}")
-"""
-Actor logits shape: torch.Size([3, 16, 64])
-Actor distribution sample shape: torch.Size([3, 16, 8, 8])
-Actor log probability shape: torch.Size([3, 16, 8])
-"""
-
-
-
 ##Test Policy step function
 print(f"\n\nTest Policy step function-->")
 latent = torch.cat((imagine_rollout["sample"], imagine_rollout["hidden"]), dim=-1)[:, 0:1]
 action_dist = agent.policy_step(latent)
-print(f"Action distribution shape: {action_dist.sample().shape}")
+print(f"Action distribution shape: {action_dist.sample().shape} in {action_dist.sample().device}")
 print(f"steps after call: {agent.carry["step"]}")
-# print(f"skill shape: {skill.shape}")
-# print(f"goal shape: {goal.shape}")
+print(f"skill shape: {agent.carry["skill"].shape} in {agent.carry["skill"].device}")
+print(f"goal shape: {agent.carry["goal"].shape} in {agent.carry["goal"].device}")
 """
 Action distribution shape: torch.Size([3, 1])
 steps after call: 1
@@ -106,19 +98,90 @@ goal shape: torch.Size([3, 1, 32])
 # print(f"action dist shape: {action_dist.probs.shape}")
 
 
-
-
 ## Test GOAL-VAE
 print("\n\nTest GOAL-VAE-->")
 metrics = agent.train_goal_vae_step(imagine_rollout)
 print(f"Metrics after training: {metrics}")
+## Breakdown of the goal-vae
+# metrics = {}
+# agent.goal_encoder.train()
+# agent.goal_decoder.train()
+
+# wm_sample = imagine_rollout["sample"]  # [B, L, Z]
+
+# # --- Forward pass ---
+# # Get encoded distribution
+# encoded_dist = agent.goal_encoder(wm_sample)  # q(z|x)
+# skill_sample = encoded_dist.sample()
+# # Get decoded distribution
+# decoded_dist = agent.goal_decoder(skill_sample)  # p(x|z)
+# # Reconstruction loss (negative log-likelihood)
+# # [B, L] -> [B]
+# recon_loss = -decoded_dist.log_prob(wm_sample.detach()).mean(-1)
+# # KL divergence
+# # [B, L] -> [B]
+# kl_loss = torch.distributions.kl_divergence(
+#     encoded_dist, agent.skill_prior
+# ).mean((-2, -1))
+# kl_coef = agent.kl_controller.update(kl_loss.detach().cpu())
+
+# vae_loss = (recon_loss + kl_coef * kl_loss).mean()  # [B] -> scalar
+
+# # --- Backward pass for VAE only ---
+# self.optimizer.zero_grad(set_to_none=True)
+# if self.scaler is not None:
+#     self.scaler.scale(vae_loss).backward()
+#     self.scaler.unscale_(self.optimizer)
+#     torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1000.0)
+#     self.scaler.step(self.optimizer)
+#     self.scaler.update()
+# else:
+#     vae_loss.backward()
+#     torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1000.0)
+#     self.optimizer.step()
+# # --- Metrics ---
+# metrics["Director/goal_recon_loss"] = recon_loss.mean().item()
+# metrics["Director/goal_kl_loss"] = kl_loss.mean().item()
+# metrics["Director/goal_VAE_loss"] = vae_loss.item()
+# print(f"\n\nskill_sample device: {skill_sample.device}")
+# print(f"recon_loss device: {recon_loss.device}")
+# print(f"kl_loss device: {kl_loss.device, kl_loss.detach().device}")
+# print(f"VAE_loss device: {vae_loss.device}")
 
 
-## Train Manger Worker
+
+
+## Test Manager
+# latent = torch.cat((imagine_rollout["sample"], imagine_rollout["hidden"]), dim=-1)
+# actor_logits = agent.manager.actor(latent)
+# actor_dist = agent.manager.policy(latent)
+# actor_dist_sample = actor_dist.sample()
+# actor_log_prob = actor_dist.log_prob(skill)
+# print(f"\n\nActor logits shape: {actor_logits.shape}")
+# print(f"Actor distribution sample shape: {actor_dist_sample.shape}")
+# print(f"Actor log probability shape: {actor_log_prob.shape}")
+"""
+Actor logits shape: torch.Size([3, 16, 64])
+Actor distribution sample shape: torch.Size([3, 16, 8, 8])
+Actor log probability shape: torch.Size([3, 16, 8])
+"""
+
+
+## Test: Train Manger Worker
+print("\n\nTest: Train Manger Worker-->")
+# metrics = agent.train_manager_worker(imagine_rollout)
+# pprint(metrics)
+
+## Breakdown of the manager-worker training
+# Check device of manager and worker
+print(f"Manager device: {next(agent.manager.actor.parameters()).device}")
+print(f"Manager critics device: {next(agent.manager.critics[0]['model'].parameters()).device}")
+print(f"Worker device: {next(agent.worker.actor.parameters()).device}")
+print(f"Worker critics device: {next(agent.worker.critics[0]['model'].parameters()).device}")
 imagine_rollout["reward_extr"] = agent.extr_reward(imagine_rollout)
 imagine_rollout["reward_expl"] = agent.explr_reward(imagine_rollout)
 imagine_rollout["reward_goal"] = agent.goal_reward(imagine_rollout)
-# imagine_rollout["delta"] = imagine_rollout["goal"] - imagine_rollout["sample"]
+imagine_rollout["delta"] = imagine_rollout["goal"] - imagine_rollout["sample"]
 # print("\nTrajectory Shapes->")
 # for k, v in imagine_rollout.items():
 #     print(f"{k}: {v.shape}")
@@ -127,7 +190,7 @@ imagine_rollout["reward_goal"] = agent.goal_reward(imagine_rollout)
 # manager_trajectory = agent.manager_traj(imagine_rollout)
 # print("\n\nManager Trajectory Shapes->")
 # for k, v in manager_trajectory.items():
-#     print(f"{k}: {v.shape}")
+#     print(f"{k}: {v.shape, v.device}")
 """
 Manager Trajectory Shapes->
 hidden: torch.Size([3, 2, 32])
@@ -187,7 +250,7 @@ weight: torch.Size([3, 2])
 # worker_trajerctory = agent.worker_traj(imagine_rollout)
 # print("\n\nWorker Trajectory Shapes->")
 # for k, v in worker_trajerctory.items():
-#     print(f"{k}: {v.shape}")
+#     print(f"{k}: {v.shape}, {v.device}")
 """
 Worker Trajectory Shapes->
 hidden: torch.Size([6, 8, 32])
@@ -260,15 +323,15 @@ weight: torch.Size([6, 8])
 # for key, value in traj.items():
 #     print(f"{key}: {value.shape}")
 
-metrics = {}
-## generate the manager and worker trajectories
+# metrics = {}
+# ## generate the manager and worker trajectories
 manager_traj = agent.manager_traj(imagine_rollout)
 worker_traj = agent.worker_traj(imagine_rollout)
 
-## Train the worker
+# ## Train the worker
 mets = agent.worker.update(worker_traj)
 metrics.update({f"worker_{k}": v for k, v in mets.items()})
-## Train the manager
+# ## Train the manager
 mets = agent.manager.update(manager_traj)
 metrics.update({f"manager_{k}": v for k, v in mets.items()})
 print(f"\n\nMetrics after training: {metrics}")
@@ -360,13 +423,12 @@ print(f"\n\nMetrics after training: {metrics}")
 # loss = policy_loss + total_value_loss - agent.manager.entropy_coef * entropy_loss
 
 
-
 # print(f"\n\nTotal critic loss: {total_critic_loss}")
 # print(f"entropy loss: {entropy_loss}")
 # print(f"Policy loss: {policy_loss}")
 # print(f"Loss: {loss}")
 
 ## test main update()
-print("\n\nTest main update()-->")
-final_metrics = agent.update(imagine_rollout) 
-pprint(final_metrics)
+# print("\n\nTest main update()-->")
+# final_metrics = agent.update(imagine_rollout)
+# pprint(final_metrics)

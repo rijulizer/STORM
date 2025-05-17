@@ -315,7 +315,7 @@ def joint_train_world_model_agent(
         # Update logs
         if logger is not None:
             for key, value in metrics.items():
-                logger.log(key, value)
+                logger.log(key, value, step=total_steps)
         # save model per episode
         if total_steps % (save_every_steps // num_envs) == 0:
             print(

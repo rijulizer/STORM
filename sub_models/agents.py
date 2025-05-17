@@ -93,7 +93,7 @@ class ActorCriticAgent(nn.Module):
         self.optimizer = torch.optim.Adam(self.parameters(), lr=3e-5, eps=1e-5)
         # Enable scaler based on DEVICE type
         self.scaler = (
-            torch.cuda.amp.GradScaler(enabled=self.use_amp)
+            torch.amp.GradScaler(enabled=self.use_amp)
             if DEVICE.type == "cuda"
             else None
         )

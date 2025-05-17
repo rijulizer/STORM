@@ -78,7 +78,7 @@ class BaseAgent(nn.Module):
         self.clip_value = 100.0  # Gradient clipping value
         self.discount = 0.99  # config
         self.lambd = 0.95  # config
-        self.entropy_coef = 0.95  # config TODO: Check this
+        self.entropy_coef = 3e-4  # config TODO: Check this
         self.use_amp = True
         self.tensor_dtype = torch.float16 if self.use_amp else torch.float32
         self.symlog_twohot_loss = SymLogTwoHotLoss(255, -20, 20)
@@ -125,8 +125,10 @@ class BaseAgent(nn.Module):
                 nn.ReLU(),
             )
             # Make a copy of critic for slow critic
-            self.critics[idx]["model"] = critic_head
-            self.critics[idx]["slow_model"] = deepcopy(critic_head)
+            # To.Device is needed because the models are not modellist or model dict
+            # So automatically wont moved to the device
+            self.critics[idx]["model"] = critic_head.to(DEVICE)
+            self.critics[idx]["slow_model"] = deepcopy(critic_head).to(DEVICE)
 
         self.lowerbound_ema = EMAScalar(decay=0.99)
         self.upperbound_ema = EMAScalar(decay=0.99)
@@ -134,7 +136,7 @@ class BaseAgent(nn.Module):
         self.optimizer = torch.optim.Adam(self.parameters(), lr=3e-5, eps=1e-5)
         # Enable scaler based on DEVICE type
         self.scaler = (
-            torch.cuda.amp.GradScaler(enabled=self.use_amp)
+            torch.amp.GradScaler(enabled=self.use_amp)
             if DEVICE.type == "cuda"
             else None
         )
@@ -483,24 +485,22 @@ class DirectorAgent(nn.Module):
         # Enable scaler based on DEVICE type
         self.use_amp = True
         self.scaler = (
-            torch.cuda.amp.GradScaler(enabled=self.use_amp)
+            torch.amp.GradScaler(enabled=self.use_amp)
             if DEVICE.type == "cuda"
             else None
         )
 
     def get_skill_prior(self):
         """
-        Returns a prior distribution over the skill space.
+        Returns a prior distribution over the skill space, on the correct device.
         """
-
         # Create logits = 0 → uniform categorical
-        logits = torch.zeros(self.skill_shape)
+        logits = torch.zeros(self.skill_shape, device=DEVICE)
         dist = torch.distributions.OneHotCategorical(logits=logits)
         # Wrap in Independent if shape > 1
-        # TODO: FInd alternative for Independent in torch distributions
-        # as this dirstribution is not supported for KL divergence
+        # TODO: Find alternative for Independent in torch distributions
+        # as this distribution is not supported for KL divergence
         # if len(self.skill_shape) > 1:
-        #     # this will be the case if the shape is like [8, 8]
         #     dist = torch.distributions.Independent(
         #         dist, reinterpreted_batch_ndims=len(self.skill_shape) - 1
         #     )
@@ -515,8 +515,10 @@ class DirectorAgent(nn.Module):
         """
         self.carry = defaultdict(str)
         self.carry["step"] = 0
-        self.carry["goal"] = torch.zeros(1, 1, self.wm_sample_dim)  # [1, 1, Z] B=1, L=1
-        self.carry["skill"] = torch.zeros(1, 1, *self.skill_shape)
+        self.carry["goal"] = torch.zeros(1, 1, self.wm_sample_dim).to(
+            DEVICE
+        )  # [1, 1, Z] B=1, L=1
+        self.carry["skill"] = torch.zeros(1, 1, *self.skill_shape).to(DEVICE)
         # carry["action"] = torch.zeros(self.wm_action_dim)
 
     @torch.no_grad()
@@ -673,7 +675,7 @@ class DirectorAgent(nn.Module):
         kl_loss = torch.distributions.kl_divergence(
             encoded_dist, self.skill_prior
         ).mean((-2, -1))
-        kl_coef = self.kl_controller.update(kl_loss.detach())
+        kl_coef = self.kl_controller.update(kl_loss.detach().cpu())
 
         vae_loss = (recon_loss + kl_coef * kl_loss).mean()  # [B] -> scalar
 

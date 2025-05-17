@@ -338,7 +338,7 @@ class WorldModel(nn.Module):
 
         # Enable scaler based on device type
         self.scaler = (
-            torch.cuda.amp.GradScaler(enabled=self.use_amp)
+            torch.amp.GradScaler(enabled=self.use_amp)
             if DEVICE.type == "cuda"
             else None
         )
