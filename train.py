@@ -1,8 +1,8 @@
 import gymnasium
-import ale_py
+import minigrid
 import argparse
 from tensorboardX import SummaryWriter
-import cv2
+
 import numpy as np
 from einops import rearrange
 import torch
@@ -30,35 +30,33 @@ from sub_models.world_models import WorldModel, MSELoss
 from sub_models.constants import DEVICE
 
 
-def build_single_env(env_name: str, image_size: int, seed: int):
+def build_single_env(env_name: str, image_size: int, seed: int = 0):
     """
     Build a single env with wrappers and preprocesses env.
     """
-    env = gymnasium.make(
-        env_name, full_action_space=False, render_mode="rgb_array", frameskip=1
-    )
+    env = gymnasium.make(env_name, render_mode="rgb_array")
     # Convert int to tuple as gymnasium.wrappers.ResizeObservation requires tuple
     if isinstance(image_size, int):
         image_size = (image_size, image_size)
-    env = env_wrapper.SeedEnvWrapper(env, seed=seed)
-    env = env_wrapper.MaxLast2FrameSkipWrapper(env, skip=4)
+    env = minigrid.wrappers.RGBImgPartialObsWrapper(env)  # Adds an "rgb" key to the obs
+    env = minigrid.wrappers.ImgObsWrapper(env)  # Sets obs = obs["rgb"], discards others
     env = gymnasium.wrappers.ResizeObservation(env, shape=image_size)
-    env = env_wrapper.LifeLossInfo(env)
+    # env = env_wrapper.LifeLossInfo(env)
 
     return env
 
 
-def build_vec_env(env_name: str, image_size: int, num_envs: int, seed: int):
+def build_vec_env(env_names: list[str], image_size: int):
     """
     Build a vectorized env with n=num_envs parallel envs.
     """
 
     # lambda pitfall refs to: https://python.plainenglish.io/python-pitfalls-with-variable-capture-dcfc113f39b7
     def lambda_generator(env_name, image_size):
-        return lambda: build_single_env(env_name, image_size, seed)
+        return lambda: build_single_env(env_name, image_size)
 
     env_fns = []
-    env_fns = [lambda_generator(env_name, image_size) for i in range(num_envs)]
+    env_fns = [lambda_generator(env_name, image_size) for env_name in env_names]
     vec_env = gymnasium.vector.AsyncVectorEnv(env_fns=env_fns)
     return vec_env
 
@@ -156,7 +154,7 @@ def world_model_imagine_data(
 
 
 def joint_train_world_model_agent(
-    env_name: str,
+    env_names: str,
     max_steps: int,
     num_envs: int,
     image_size: int,
@@ -181,11 +179,11 @@ def joint_train_world_model_agent(
     os.makedirs(f"ckpt/{args.exp_name}", exist_ok=True)
     # build vec env, not useful in the Atari100k setting
     # but when the max_steps is large, you can use parallel envs to speed up
-    vec_env = build_vec_env(env_name, image_size, num_envs=num_envs, seed=seed)
+    vec_env = build_vec_env(env_names, image_size)
     print(
         "Current env: "
         + colorama.Fore.YELLOW
-        + f"{env_name}"
+        + f"{len(env_names)} parallel envs"
         + colorama.Style.RESET_ALL
     )
 
@@ -253,8 +251,8 @@ def joint_train_world_model_agent(
                     # )  # framskip=4
                     # logger.log("replay_buffer/length", len(replay_buffer))
                     # sum_reward[i] = 0
-                    metrics[f"sample/{env_name}_reward"] = sum_reward[i]
-                    metrics[f"sample/{env_name}_episode_steps"] = (
+                    metrics[f"sample/{env_names[i]}_reward"] = sum_reward[i]
+                    metrics[f"sample/{env_names[i]}_episode_steps"] = (
                         current_info["episode_frame_number"][i] // 4
                     )  # framskip=4
                     metrics["replay_buffer/length"] = len(replay_buffer)

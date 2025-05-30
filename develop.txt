@@ -12,3 +12,9 @@
 when that data is loaded. the WM.imagine_data() function converts the environmental data to latent sample, etc....
 So the agent related data can also be dealt like that. The agent can store goal and skill. 
 Moreoever the stoing is only necesaay withon one contenxt length L
+
+TODOs:
+1. Check the losses why are some in negative do they make sense?
+2. Inspect sanity if all the things are workign by inspecting them like if the goals are working if the skill is working
+3. Track diagonistics data like if the weights are changing or not stuff like that
+4. Then think logically if something is not working!!
