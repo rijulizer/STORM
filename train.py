@@ -1,6 +1,7 @@
 import gymnasium
 import minigrid
 import argparse
+from functools import partial
 from tensorboardX import SummaryWriter
 
 import numpy as np
@@ -22,15 +23,17 @@ from utils import seed_np_torch, Logger, load_config
 from sub_models.replay_buffer import ReplayBuffer
 import env_wrapper
 
-# import sub_models.agents as agents
-from sub_models.director_agents import DirectorAgent
+from sub_models.agents import ActorCriticAgent
+
+# from sub_models.director_agents import DirectorAgent
+
 from sub_models.functions_losses import symexp
 from sub_models.world_models import WorldModel, MSELoss
 
 from sub_models.constants import DEVICE
 
 
-def build_single_env(env_name: str, image_size: int, seed: int = 0):
+def build_single_env(env_name: str, image_size: int, env_observablity: str = "Full"):
     """
     Build a single env with wrappers and preprocesses env.
     """
@@ -38,6 +41,12 @@ def build_single_env(env_name: str, image_size: int, seed: int = 0):
     # Convert int to tuple as gymnasium.wrappers.ResizeObservation requires tuple
     if isinstance(image_size, int):
         image_size = (image_size, image_size)
+    if env_observablity == "Full":
+        env = minigrid.wrappers.RGBImgObsWrapper(env)
+    elif env_observablity == "Partial":
+        env = minigrid.wrappers.RGBImgPartialObsWrapper(env)
+    else:
+        raise ValueError(f"Unknown env observability {env_observablity}")
     env = minigrid.wrappers.RGBImgPartialObsWrapper(env)  # Adds an "rgb" key to the obs
     env = minigrid.wrappers.ImgObsWrapper(env)  # Sets obs = obs["rgb"], discards others
     env = gymnasium.wrappers.ResizeObservation(env, shape=image_size)
@@ -46,17 +55,14 @@ def build_single_env(env_name: str, image_size: int, seed: int = 0):
     return env
 
 
-def build_vec_env(env_names: list[str], image_size: int):
+def build_vec_env(env_names: list[str], image_size: int, env_observablity):
     """
     Build a vectorized env with n=num_envs parallel envs.
     """
-
-    # lambda pitfall refs to: https://python.plainenglish.io/python-pitfalls-with-variable-capture-dcfc113f39b7
-    def lambda_generator(env_name, image_size):
-        return lambda: build_single_env(env_name, image_size)
-
-    env_fns = []
-    env_fns = [lambda_generator(env_name, image_size) for env_name in env_names]
+    env_fns = [
+        partial(build_single_env, env_name, image_size, env_observablity)
+        for env_name in env_names
+    ]
     vec_env = gymnasium.vector.AsyncVectorEnv(env_fns=env_fns)
     return vec_env
 
@@ -79,11 +85,23 @@ def build_agent(conf, action_dim: int):
     """
     Return an agent with the specified configuration
     """
-    return DirectorAgent(
-        conf.Models.WorldModel.TransformerHiddenDim,
-        32 * 32,  # faltten sample dim
-        action_dim,
+    # ActorCriticAgent
+    return ActorCriticAgent(
+        feat_dim=32 * 32 + conf.Models.WorldModel.TransformerHiddenDim,
+        num_layers=conf.Models.Agent.NumLayers,
+        hidden_dim=conf.Models.Agent.HiddenDim,
+        action_dim=action_dim,
+        gamma=conf.Models.Agent.Gamma,
+        lambd=conf.Models.Agent.Lambda,
+        entropy_coef=conf.Models.Agent.EntropyCoef,
     ).to(DEVICE)
+
+    # DirectorAgent
+    # return DirectorAgent(
+    #     conf.Models.WorldModel.TransformerHiddenDim,
+    #     32 * 32,  # faltten sample dim
+    #     action_dim,
+    # ).to(DEVICE)
 
 
 def train_world_model(
@@ -117,7 +135,7 @@ def train_world_model(
 def world_model_imagine_data(
     replay_buffer: ReplayBuffer,
     world_model: WorldModel,
-    agent: DirectorAgent,
+    agent: ActorCriticAgent,
     imagine_batch_size,
     imagine_demonstration_batch_size,
     imagine_context_length,
@@ -154,13 +172,14 @@ def world_model_imagine_data(
 
 
 def joint_train_world_model_agent(
-    env_names: str,
+    env_names: list[str],
     max_steps: int,
     num_envs: int,
+    env_observablity: str,
     image_size: int,
     replay_buffer: ReplayBuffer,
     world_model: WorldModel,
-    agent: DirectorAgent,
+    agent: ActorCriticAgent,
     train_dynamics_every_steps,
     train_agent_every_steps,
     batch_size,
@@ -179,7 +198,7 @@ def joint_train_world_model_agent(
     os.makedirs(f"ckpt/{args.exp_name}", exist_ok=True)
     # build vec env, not useful in the Atari100k setting
     # but when the max_steps is large, you can use parallel envs to speed up
-    vec_env = build_vec_env(env_names, image_size)
+    vec_env = build_vec_env(env_names, image_size, env_observablity)
     print(
         "Current env: "
         + colorama.Fore.YELLOW
@@ -189,12 +208,13 @@ def joint_train_world_model_agent(
 
     # reset envs and variables
     sum_reward = np.zeros(num_envs)
-    current_obs, current_info = vec_env.reset()
+    step_counters = np.zeros(num_envs, dtype=int)
+    current_obs, current_info = vec_env.reset()  # [E, 64, 64, 3] #E=num_envs
     context_obs = deque(maxlen=16)
     context_action = deque(maxlen=16)
 
     # sample and train
-    for total_steps in tqdm(range(max_steps // num_envs)):
+    for total_steps in tqdm(range(max_steps)):
         # sample part >>>
         if replay_buffer.ready:  # ready only after warmpup
             # WM and Agent are in eval mode
@@ -203,7 +223,7 @@ def joint_train_world_model_agent(
             with torch.no_grad():
                 if len(context_action) == 0:
                     # this is the case in the first step
-                    action = vec_env.action_space.sample()
+                    action = vec_env.action_space.sample()  # [E]
                 else:
                     context_latent = world_model.encode_obs(
                         torch.cat(list(context_obs), dim=1)
@@ -214,12 +234,12 @@ def joint_train_world_model_agent(
                         world_model.calc_last_dist_feat(
                             context_latent, model_context_action
                         )
-                    )  # [1,1,1024], [1,1,512]
+                    )  # [E,n,1024], [E,n,512]
                     action = agent.sample_as_env_action(
                         torch.cat([prior_flattened_sample, last_dist_feat], dim=-1),
                         greedy=False,
-                    )
-            # [B, H, W, C] -> [B, 1, C, H, W] # B=1
+                    )  # [E]
+            # [E, H, W, C] -> [E, 1, C, H, W]
             context_obs.append(
                 torch.permute(
                     torch.tensor(current_obs, device=DEVICE), (0, 3, 1, 2)
@@ -229,47 +249,38 @@ def joint_train_world_model_agent(
             context_action.append(action)
         else:
             # sample single random action
-            action = vec_env.action_space.sample()
+            action = vec_env.action_space.sample()  # [E]
 
         # Perform action in the env and observe the next state, reward, done, truncated
-        # Single Unbatched instances: ((1, 64, 64, 3), (1,), (1,), (1,), (1,))
+        # Single Unbatched instances: # ((4, 64, 64, 3), (4,), (4,), (4,), (4,)); E=4
         obs, reward, done, truncated, info = vec_env.step(action)
 
         # Append the transition to the replay buffer
-        replay_buffer.append(
-            current_obs, action, reward, np.logical_or(done, info["life_loss"])
-        )
+        replay_buffer.append(current_obs, action, reward, done)
 
         done_flag = np.logical_or(done, truncated)
         if done_flag.any():  # end of episode
             for i in range(num_envs):
                 if done_flag[i]:
-                    # logger.log(f"sample/{env_name}_reward", sum_reward[i])
-                    # logger.log(
-                    #     f"sample/{env_name}_episode_steps",
-                    #     current_info["episode_frame_number"][i] // 4,
-                    # )  # framskip=4
-                    # logger.log("replay_buffer/length", len(replay_buffer))
-                    # sum_reward[i] = 0
-                    metrics[f"sample/{env_names[i]}_reward"] = sum_reward[i]
-                    metrics[f"sample/{env_names[i]}_episode_steps"] = (
-                        current_info["episode_frame_number"][i] // 4
-                    )  # framskip=4
+                    env_id = env_names[i][:16]
+                    # Log reward for this environment
+                    metrics[f"sample/{env_id}_reward"] = sum_reward[i]
+                    metrics[f"sample/{env_id}_episode_steps"] = step_counters[i]
                     metrics["replay_buffer/length"] = len(replay_buffer)
+                    # Reset reward tracker and step counter
                     sum_reward[i] = 0
+                    step_counters[i] = 0
 
         # Update current_obs, current_info and sum_reward
-        sum_reward += reward
+        sum_reward += reward  # [E]
         current_obs = obs
         current_info = info
+        step_counters += 1
         # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<< sample part
 
         # Train world model part >>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-        if (
-            replay_buffer.ready
-            and total_steps % (train_dynamics_every_steps // num_envs) == 0
-        ):
-            print("Training World Model...")
+        if replay_buffer.ready and total_steps % train_dynamics_every_steps == 0:
+            # print("Training World Model...")
             wm_train_metrics = train_world_model(
                 replay_buffer=replay_buffer,
                 world_model=world_model,
@@ -285,10 +296,10 @@ def joint_train_world_model_agent(
         # Train agent on WM imagined data >>>>>>>>>>>>>>>>>>>>>>>>>>>
         if (
             replay_buffer.ready
-            and total_steps % (train_agent_every_steps // num_envs) == 0
+            and total_steps % train_agent_every_steps == 0
             and total_steps * num_envs >= 0
         ):
-            print("Training Agent...")
+            # print("Training Agent...")
             # if total_steps % (save_every_steps // num_envs) == 0:
             #     log_video = True
             # else:
@@ -361,9 +372,7 @@ if __name__ == "__main__":
     # distinguish between tasks, other debugging options are removed for simplicity
     if conf.Task == "JointTrainAgent":
         # getting action_dim with dummy env
-        dummy_env = build_single_env(
-            args.env_name, conf.BasicSettings.ImageSize, seed=0
-        )
+        dummy_env = build_single_env(args.env_name, conf.BasicSettings.ImageSize)
         action_dim = dummy_env.action_space.n
 
         # build world model and agent

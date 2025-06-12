@@ -55,13 +55,12 @@ class WandbLogger:
 
 
 class RunParams:
-    def __init__(self, env_name="MsPacman", exp_name="STORM-Director"):
-        self._env_name = env_name
+    def __init__(self, env_names, exp_name: str):
         self.exp_name = exp_name
         self.seed = 1
         self.config_path = "config_files/STORM.yaml"
-        self.trajectory_path = f"D_TRAJ/{self._env_name}.pkl"
-        self.env_name = f"ALE/{self._env_name}-v5"
+        # self.trajectory_path = f"D_TRAJ/{self._env_name}.pkl"
+        self.env_names = env_names
 
         self.conf = load_config(self.config_path)
         self.print_args()
@@ -78,34 +77,25 @@ class RunParams:
         print(
             colorama.Fore.GREEN + "seed: " + colorama.Style.RESET_ALL + str(self.seed)
         )
-        print(
-            colorama.Fore.GREEN
-            + "config_path: "
-            + colorama.Style.RESET_ALL
-            + self.config_path
-        )
-        print(
-            colorama.Fore.GREEN
-            + "trajectory_path: "
-            + colorama.Style.RESET_ALL
-            + self.trajectory_path
-        )
-        print(
-            colorama.Fore.GREEN
-            + "env_name: "
-            + colorama.Style.RESET_ALL
-            + self.env_name
-        )
+        # print(colorama.Fore.GREEN + "config_path: " + colorama.Style.RESET_ALL + self.config_path)
+        print(colorama.Fore.GREEN + "env_name: " + colorama.Style.RESET_ALL)
+        print(self.env_names)
         print(colorama.Fore.GREEN + "-----------------" + colorama.Style.RESET_ALL)
 
 
 def main():
-    run_params = RunParams(env_name="MsPacman", exp_name="STORM-Director-3")
+    env_names = [
+        "MiniGrid-Empty-8x8-v0",
+        "MiniGrid-SimpleCrossingS9N3-v0",
+        "MiniGrid-DoorKey-8x8-v0",
+        "MiniGrid-FourRooms-v0",
+    ]
+    run_params = RunParams(env_names, exp_name="MultiEnv-Baseline_v4")
     # set seed
     seed_np_torch(seed=run_params.seed)
     # copy config file
-    os.makedirs(f"runs/{run_params.exp_name}", exist_ok=True)
-    shutil.copy(run_params.config_path, f"runs/{run_params.exp_name}/config.yaml")
+    # os.makedirs(f"runs/{run_params.exp_name}", exist_ok=True)
+    # shutil.copy(run_params.config_path, f"runs/{run_params.exp_name}/config.yaml")
 
     print(f"Train Steps: {run_params.conf.JointTrainAgent.SampleMaxSteps}")
     print(f"Train Batch Size: {run_params.conf.JointTrainAgent.BatchSize}")
@@ -113,7 +103,7 @@ def main():
     # Setuop env, models, replay buffer
     # getting action_dim with dummy env
     dummy_env = build_single_env(
-        run_params.env_name, run_params.conf.BasicSettings.ImageSize, seed=0
+        run_params.env_names[0], run_params.conf.BasicSettings.ImageSize
     )
     action_dim = dummy_env.action_space.n
 
@@ -136,7 +126,7 @@ def main():
             run_params.conf.BasicSettings.ImageSize,
             3,
         ),
-        num_envs=run_params.conf.JointTrainAgent.NumEnvs,
+        num_envs=len(run_params.env_names),
         max_length=run_params.conf.JointTrainAgent.BufferMaxLength,
         warmup_length=run_params.conf.JointTrainAgent.BufferWarmUp,
         store_on_gpu=run_params.conf.BasicSettings.ReplayBufferOnGPU,
@@ -152,10 +142,11 @@ def main():
 
     # Initialize wandb
     with wandb.init(
-        project="Director",  # Replace with your project name
+        project="Thesis",  # Replace with your project name
         name=run_params.exp_name,  # Use the experiment name from RunParam
         config={
-            "env_name": run_params.env_name,
+            "env_name": str(run_params.env_names),
+            "num_envs": len(run_params.env_names),
             "seed": run_params.seed,
         },
     ) as run:
@@ -168,11 +159,13 @@ def main():
             }
         )
         logger = WandbLogger(run)
-        # train
+        # logger = None
+        ## train
         joint_train_world_model_agent(
-            env_name=run_params.env_name,
-            num_envs=run_params.conf.JointTrainAgent.NumEnvs,
+            env_names=run_params.env_names,
+            num_envs=len(run_params.env_names),
             max_steps=run_params.conf.JointTrainAgent.SampleMaxSteps,
+            env_observablity=run_params.conf.BasicSettings.EnvObservability,
             image_size=run_params.conf.BasicSettings.ImageSize,
             replay_buffer=replay_buffer,
             world_model=world_model,

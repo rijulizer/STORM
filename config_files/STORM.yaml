@@ -4,21 +4,22 @@ BasicSettings:
   Seed: 0
   ImageSize: 64
   ReplayBufferOnGPU: True
+  EnvObservability: "Full" # Full, Partial
 
 JointTrainAgent:
-  SampleMaxSteps: 25000 # original: 102000
-  BufferMaxLength: 50000 # original: 100000
+  SampleMaxSteps: 50000 # original: 102000
+  BufferMaxLength: 100000 # original: 100000
   BufferWarmUp: 1024
-  NumEnvs: 1
+  NumEnvs: 4
   BatchSize: 128 # original: 64
   DemonstrationBatchSize: 4
   BatchLength: 64
   ImagineBatchSize: 1024 
   ImagineDemonstrationBatchSize: 256 # original: 256
   ImagineContextLength: 8
-  ImagineBatchLength: 16
-  TrainDynamicsEverySteps: 1
-  TrainAgentEverySteps: 1
+  ImagineBatchLength: 32 # original: 16
+  TrainDynamicsEverySteps: 1 # original: 1
+  TrainAgentEverySteps: 1 # original: 1
   UseDemonstration: False
   SaveEverySteps: 2500
 
