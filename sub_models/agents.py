@@ -23,20 +23,17 @@ def percentile(x, percentage):
 
 
 def calc_lambda_return(rewards, values, termination, gamma, lam, dtype=torch.float32):
-    # Invert termination to have 0 if the episode ended and 1 otherwise
-    inv_termination = (termination * -1) + 1
 
-    batch_size, batch_length = rewards.shape[:2]
+    # Invert termination to have 0 if the episode ended and 1 otherwise
+    continuation = (termination * -1) + 1
+
+    B, L = rewards.shape[:2]
     # gae_step = torch.zeros((batch_size, ), dtype=dtype, device=device)
-    gamma_return = torch.zeros(
-        (batch_size, batch_length + 1), dtype=dtype, device=DEVICE
-    )
+    gamma_return = torch.zeros((B, L + 1), dtype=dtype, device=DEVICE)
     gamma_return[:, -1] = values[:, -1]
-    for t in reversed(range(batch_length)):  # with last bootstrap
-        gamma_return[:, t] = (
-            rewards[:, t]
-            + gamma * inv_termination[:, t] * (1 - lam) * values[:, t]
-            + gamma * inv_termination[:, t] * lam * gamma_return[:, t + 1]
+    for t in reversed(range(L)):  # with last bootstrap
+        gamma_return[:, t] = rewards[:, t] + gamma * continuation[:, t] * (
+            (1 - lam) * values[:, t] + lam * gamma_return[:, t + 1]
         )
     return gamma_return[:, :-1]
 
@@ -163,17 +160,25 @@ class ActorCriticAgent(nn.Module):
         action = self.sample(latent, greedy)
         return action.detach().cpu().squeeze(-1).numpy()
 
-    def update(self, latent, action, reward, termination, logger=None):
+    def update(self, imagine_rollout):
         """
         Update policy and value model
         """
+        metrics = {}
         self.train()
         with torch.autocast(
             device_type=DEVICE.type, dtype=DTYPE_16, enabled=self.use_amp
         ):
+            hidden = imagine_rollout["hidden"]  # [B, L, feat_dim]
+            sample = imagine_rollout["sample"]  # [B, L, feat_dim]
+            latent = torch.cat((sample, hidden), dim=-1)  # [B, L, 2*]
+            action = imagine_rollout["action"]
+            reward = imagine_rollout["reward"]
+            termination = imagine_rollout["termination"]
+
             logits, raw_value = self.get_logits_raw_value(latent)
             dist = distributions.Categorical(
-                logits=logits[:, :-1]
+                logits=logits  # logits[:, :-1]
             )  # FIXME this is not needed anymore as wm.imagine has been changed
             log_prob = dist.log_prob(action)
             entropy = dist.entropy()
@@ -190,10 +195,10 @@ class ActorCriticAgent(nn.Module):
 
             # update value function with slow critic regularization
             value_loss = self.symlog_twohot_loss(
-                raw_value[:, :-1], lambda_return.detach()
+                raw_value, lambda_return.detach()  # FIXME: raw_value[:, :-1]
             )
             slow_value_regularization_loss = self.symlog_twohot_loss(
-                raw_value[:, :-1], slow_lambda_return.detach()
+                raw_value, slow_lambda_return.detach()  # FIXME: raw_value[:, :-1]
             )
 
             lower_bound = self.lowerbound_ema(percentile(lambda_return, 0.05))
@@ -202,7 +207,9 @@ class ActorCriticAgent(nn.Module):
             norm_ratio = torch.max(
                 torch.ones(1).to(DEVICE), S
             )  # max(1, S) in the paper
-            norm_advantage = (lambda_return - value[:, :-1]) / norm_ratio
+            norm_advantage = (
+                lambda_return - value
+            ) / norm_ratio  # FIXME: value[:, :-1]
             policy_loss = -(log_prob * norm_advantage.detach()).mean()
 
             entropy_loss = entropy.mean()
@@ -229,10 +236,10 @@ class ActorCriticAgent(nn.Module):
 
         self.update_slow_critic()
 
-        if logger is not None:
-            logger.log("ActorCritic/policy_loss", policy_loss.item())
-            logger.log("ActorCritic/value_loss", value_loss.item())
-            logger.log("ActorCritic/entropy_loss", entropy_loss.item())
-            logger.log("ActorCritic/S", S.item())
-            logger.log("ActorCritic/norm_ratio", norm_ratio.item())
-            logger.log("ActorCritic/total_loss", loss.item())
+        metrics["AC/policy_loss"] = policy_loss.item()
+        metrics["AC/value_loss"] = value_loss.item()
+        metrics["AC/entropy_loss"] = entropy_loss.item()
+        metrics["AC/S"] = S.item()
+        metrics["AC/norm_ratio"] = norm_ratio.item()
+        metrics["AC/total_loss"] = loss.item()
+        return metrics

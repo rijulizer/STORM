@@ -19,7 +19,7 @@ from sub_models.transformer_model import (
 )
 from sub_models.constants import DEVICE, DTYPE_16
 
-# import sub_models.agents as agents
+import sub_models.agents as ActorCriticAgent
 from sub_models.director_agents import DirectorAgent
 
 
@@ -429,9 +429,9 @@ class WorldModel(nn.Module):
         #     self.imagine_batch_size != imagine_batch_size
         #     or self.imagine_batch_length != imagine_batch_length
         # ): # probably not needed
-        print(
-            f"init_imagine_buffer: {imagine_batch_size}x{imagine_batch_length}@{dtype}"
-        )
+        # print(
+        #     f"init_imagine_buffer: {imagine_batch_size}x{imagine_batch_length}@{dtype}"
+        # )
         self.B = imagine_batch_size
         self.L = imagine_batch_length
 
@@ -457,7 +457,7 @@ class WorldModel(nn.Module):
 
     def imagine_data(
         self,
-        agent: DirectorAgent,
+        agent: ActorCriticAgent,
         buffer_sample,
         imagine_batch_size,
         imagine_batch_length,

@@ -18,3 +18,13 @@ TODOs:
 2. Inspect sanity if all the things are workign by inspecting them like if the goals are working if the skill is working
 3. Track diagonistics data like if the weights are changing or not stuff like that
 4. Then think logically if something is not working!!
+
+#Multi Envs:
+1. Check the models action is a list for all envs. agent.sample_as_env_action()
+    Yes. Existing code autoamtically handles that as an extra dimension
+2. Replay buffere randomizing indexes but it the same across envs. That means similar timeframes of the 4 envs are chooses although the tiem frames are randomized.
+when 0->16 chosen, then its 0-16 for all the envs. Next 5-21 for all the 4 envs.
+Yes. In RL training (especially model-based), once you’ve collected transitions, you typically don’t care which env they came from. What matters is that:
+They’re valid trajectories of length T.
+They're not crossing episode boundaries (you should ensure this).
+The model gets enough diverse samples.

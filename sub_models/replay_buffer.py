@@ -36,20 +36,6 @@ class ReplayBuffer:
                         device=DEVICE,
                         requires_grad=False,
                     )
-                # elif entity == "goal":
-                #     self.buffer[entity] = torch.empty(
-                #         (max_length // num_envs, num_envs, agent_goal_shape),
-                #         dtype=torch.float32,
-                #         device=DEVICE,
-                #         requires_grad=False,
-                #     )
-                # elif entity == "skill":
-                #     self.buffer[entity] = torch.empty(
-                #         (max_length // num_envs, num_envs, *agent_skill_shape),
-                #         dtype=torch.float32,
-                #         device=DEVICE,
-                #         requires_grad=False,
-                #     )
                 else:
                     self.buffer[entity] = torch.empty(
                         (max_length // num_envs, num_envs),
@@ -63,16 +49,6 @@ class ReplayBuffer:
                         (max_length // num_envs, num_envs, *obs_shape),
                         dtype=np.uint8,
                     )
-                # elif entity == "goal":
-                #     self.buffer[entity] = np.empty(
-                #         (max_length // num_envs, num_envs, agent_goal_shape),
-                #         dtype=np.float32,
-                #     )
-                # elif entity == "skill":
-                #     self.buffer[entity] = np.empty(
-                #         (max_length // num_envs, num_envs, *agent_skill_shape),
-                #         dtype=np.float32,
-                #     )
                 else:
                     self.buffer[entity] = np.empty(
                         (max_length // num_envs, num_envs), dtype=np.float32
@@ -160,7 +136,7 @@ class ReplayBuffer:
         if self.external_buffer_length is not None and external_batch_size > 0:
             # If external buffer is available, sample from it
             external_buffer = self.sample_external(external_batch_size, batch_length)
-        # iterate over the entities like obs, action, reward, done, goal, skill
+        # iterate over the entities: obs, action, reward, done, goal, skill
         for entity in self.entities:
             if batch_size > 0:
                 for i in range(self.num_envs):
