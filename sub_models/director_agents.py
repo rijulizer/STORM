@@ -212,9 +212,9 @@ class BaseAgent(nn.Module):
         goal = traj.get("goal", None)
         if goal is not None:
             # for the case of worker the goal is also part of latent
-            latent = torch.cat((hidden, sample, goal), dim=-1)  # [B, L, 3*]
+            latent = torch.cat((sample, hidden, goal), dim=-1)  # [B, L, 3*]
         else:
-            latent = torch.cat((hidden, sample), dim=-1)  # [B, L, 2*]
+            latent = torch.cat((sample, hidden), dim=-1)  # [B, L, 2*]
         self.train()
         with torch.autocast(
             device_type=DEVICE.type, dtype=DTYPE_16, enabled=self.use_amp
