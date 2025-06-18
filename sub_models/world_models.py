@@ -1,3 +1,4 @@
+import wandb
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -282,8 +283,8 @@ class WorldModel(nn.Module):
         self.final_feature_width = 4
         self.stoch_dim = 32
         self.stoch_flattened_dim = self.stoch_dim * self.stoch_dim
-        self.use_amp = False  # FIXME: True
-        self.tensor_dtype = torch.float16 if self.use_amp else torch.float32
+        self.use_amp = True
+        self.tensor_dtype = DTYPE_16 if self.use_amp else torch.float32
         self.imagine_batch_size = -1
         self.imagine_batch_length = -1
 
@@ -536,14 +537,25 @@ class WorldModel(nn.Module):
                 obs_hat_list.append(last_obs_hat[:: B // 16])  # uniform sample vec_env
 
         if log_video:
-            logger.log(
-                "Imagine/predict_video",
-                torch.clamp(torch.cat(obs_hat_list, dim=1), 0, 1)
-                .cpu()
-                .float()
-                .detach()
-                .numpy(),
-            )
+            try:
+                # video = (
+                #     torch.clamp(torch.cat(obs_hat_list, dim=1), 0, 1)
+                #     .cpu()
+                #     .float()
+                #     .detach()
+                #     .numpy()
+                # )
+                video = torch.cat(obs_hat_list, dim=1)  # [B, T, C, H, W]
+                video = video[0]  # take batch index 0: [T, C, H, W]
+                video = (
+                    torch.clamp(video * 255.0, 0, 255).to(torch.uint8).cpu().numpy()
+                )  # uint8
+
+                logger.run.log(
+                    {"Imagine/predict_video": wandb.Video(video, fps=4, format="mp4")}
+                )
+            except Exception:
+                pass
         # ensure the last token is removed to make the length of the buffer same
         # [B, L+1, C] -> [B, L, C]
         self.sample_buffer = self.sample_buffer[:, 0:L]  # remove the last token
