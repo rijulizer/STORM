@@ -33,24 +33,43 @@ from sub_models.world_models import WorldModel, MSELoss
 from sub_models.constants import DEVICE
 
 
-def build_single_env(env_name: str, image_size: int, env_observablity: str = "Full"):
+# def build_single_env(env_name: str, image_size: int, env_observablity: str = "Full"):
+#     """
+#     Build a single env with wrappers and preprocesses env.
+#     """
+#     env = gymnasium.make(env_name, render_mode="rgb_array")
+#     # Convert int to tuple as gymnasium.wrappers.ResizeObservation requires tuple
+#     if isinstance(image_size, int):
+#         image_size = (image_size, image_size)
+#     if env_observablity == "Full":
+#         env = minigrid.wrappers.RGBImgObsWrapper(env)
+#     elif env_observablity == "Partial":
+#         env = minigrid.wrappers.RGBImgPartialObsWrapper(env)
+#     else:
+#         raise ValueError(f"Unknown env observability {env_observablity}")
+#     env = minigrid.wrappers.ImgObsWrapper(env)  # Sets obs = obs["rgb"], discards others
+#     env = gymnasium.wrappers.ResizeObservation(env, shape=image_size)
+#     # env = env_wrapper.LifeLossInfo(env)
+
+#     return env
+
+
+def build_single_env(
+    env_name: str, image_size: int, env_observablity=None, seed: int = 0
+):
     """
     Build a single env with wrappers and preprocesses env.
     """
-    env = gymnasium.make(env_name, render_mode="rgb_array")
+    env = gymnasium.make(
+        env_name, full_action_space=False, render_mode="rgb_array", frameskip=1
+    )
     # Convert int to tuple as gymnasium.wrappers.ResizeObservation requires tuple
     if isinstance(image_size, int):
         image_size = (image_size, image_size)
-    if env_observablity == "Full":
-        env = minigrid.wrappers.RGBImgObsWrapper(env)
-    elif env_observablity == "Partial":
-        env = minigrid.wrappers.RGBImgPartialObsWrapper(env)
-    else:
-        raise ValueError(f"Unknown env observability {env_observablity}")
-    env = minigrid.wrappers.RGBImgPartialObsWrapper(env)  # Adds an "rgb" key to the obs
-    env = minigrid.wrappers.ImgObsWrapper(env)  # Sets obs = obs["rgb"], discards others
+    env = env_wrapper.SeedEnvWrapper(env, seed=seed)
+    env = env_wrapper.MaxLast2FrameSkipWrapper(env, skip=4)
     env = gymnasium.wrappers.ResizeObservation(env, shape=image_size)
-    # env = env_wrapper.LifeLossInfo(env)
+    env = env_wrapper.LifeLossInfo(env)
 
     return env
 
@@ -256,7 +275,9 @@ def joint_train_world_model_agent(
         obs, reward, done, truncated, info = vec_env.step(action)
 
         # Append the transition to the replay buffer
-        replay_buffer.append(current_obs, action, reward, done)
+        replay_buffer.append(
+            current_obs, action, reward, np.logical_or(done, info["life_loss"])
+        )
 
         done_flag = np.logical_or(done, truncated)
         if done_flag.any():  # end of episode
@@ -300,10 +321,10 @@ def joint_train_world_model_agent(
             and total_steps * num_envs >= 0
         ):
             # print("Training Agent...")
-            # if total_steps % (save_every_steps // num_envs) == 0:
-            #     log_video = True
-            # else:
-            log_video = False
+            if total_steps % save_every_steps == 0:
+                log_video = True
+            else:
+                log_video = False
             # Generate imagined rollout data
             imagine_rollout = world_model_imagine_data(
                 replay_buffer,
@@ -314,7 +335,7 @@ def joint_train_world_model_agent(
                 imagine_context_length,
                 imagine_batch_length,
                 log_video,
-                # logger,
+                logger,
             )
             # Update agent with imagined data
             agent_metrics = agent.update(imagine_rollout)

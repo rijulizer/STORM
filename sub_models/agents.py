@@ -18,7 +18,7 @@ def percentile(x, percentage):
         sorted_x, _ = torch.sort(flat_x)
         per = sorted_x[kth]
     else:
-        per = torch.kthvalue(flat_x, kth + 1).values
+        per = torch.kthvalue(flat_x, kth).values
     return per
 
 
