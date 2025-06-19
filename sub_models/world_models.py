@@ -558,8 +558,8 @@ class WorldModel(nn.Module):
                 pass
         # ensure the last token is removed to make the length of the buffer same
         # [B, L+1, C] -> [B, L, C]
-        self.sample_buffer = self.sample_buffer[:, 0:L]  # remove the last token
-        self.hidden_buffer = self.hidden_buffer[:, 0:L]
+        # self.sample_buffer = self.sample_buffer[:, 0:L]  #TODO: Needed for DirectorAgent
+        # self.hidden_buffer = self.hidden_buffer[:, 0:L]  #TODO: Needed for DirectorAgent
         # return imagine_rollout
         imagine_rollout = {
             "sample": self.sample_buffer,

@@ -85,13 +85,13 @@ class RunParams:
 
 def main():
     env_names = [
-        "ALE/MsPacman-v5",
-        # "MiniGrid-Empty-8x8-v0",
+        # "ALE/MsPacman-v5",
+        "MiniGrid-Empty-8x8-v0",
         # "MiniGrid-SimpleCrossingS9N3-v0",
         # "MiniGrid-DoorKey-8x8-v0",
         # "MiniGrid-FourRooms-v0",
     ]
-    run_params = RunParams(env_names, exp_name="MsPacmanFullObs-Baseline_v3")
+    run_params = RunParams(env_names, exp_name="EmptyFullObs-Baseline_v3")
     # set seed
     seed_np_torch(seed=run_params.seed)
     # copy config file

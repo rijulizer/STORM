@@ -33,45 +33,45 @@ from sub_models.world_models import WorldModel, MSELoss
 from sub_models.constants import DEVICE
 
 
-# def build_single_env(env_name: str, image_size: int, env_observablity: str = "Full"):
-#     """
-#     Build a single env with wrappers and preprocesses env.
-#     """
-#     env = gymnasium.make(env_name, render_mode="rgb_array")
-#     # Convert int to tuple as gymnasium.wrappers.ResizeObservation requires tuple
-#     if isinstance(image_size, int):
-#         image_size = (image_size, image_size)
-#     if env_observablity == "Full":
-#         env = minigrid.wrappers.RGBImgObsWrapper(env)
-#     elif env_observablity == "Partial":
-#         env = minigrid.wrappers.RGBImgPartialObsWrapper(env)
-#     else:
-#         raise ValueError(f"Unknown env observability {env_observablity}")
-#     env = minigrid.wrappers.ImgObsWrapper(env)  # Sets obs = obs["rgb"], discards others
-#     env = gymnasium.wrappers.ResizeObservation(env, shape=image_size)
-#     # env = env_wrapper.LifeLossInfo(env)
-
-#     return env
-
-
-def build_single_env(
-    env_name: str, image_size: int, env_observablity=None, seed: int = 0
-):
+def build_single_env(env_name: str, image_size: int, env_observablity: str = "Full"):
     """
     Build a single env with wrappers and preprocesses env.
     """
-    env = gymnasium.make(
-        env_name, full_action_space=False, render_mode="rgb_array", frameskip=1
-    )
+    env = gymnasium.make(env_name, render_mode="rgb_array")
     # Convert int to tuple as gymnasium.wrappers.ResizeObservation requires tuple
     if isinstance(image_size, int):
         image_size = (image_size, image_size)
-    env = env_wrapper.SeedEnvWrapper(env, seed=seed)
-    env = env_wrapper.MaxLast2FrameSkipWrapper(env, skip=4)
+    if env_observablity == "Full":
+        env = minigrid.wrappers.RGBImgObsWrapper(env)
+    elif env_observablity == "Partial":
+        env = minigrid.wrappers.RGBImgPartialObsWrapper(env)
+    else:
+        raise ValueError(f"Unknown env observability {env_observablity}")
+    env = minigrid.wrappers.ImgObsWrapper(env)  # Sets obs = obs["rgb"], discards others
     env = gymnasium.wrappers.ResizeObservation(env, shape=image_size)
-    env = env_wrapper.LifeLossInfo(env)
+    # env = env_wrapper.LifeLossInfo(env)
 
     return env
+
+
+# def build_single_env(
+#     env_name: str, image_size: int, env_observablity=None, seed: int = 1
+# ):
+#     """
+#     Build a single env with wrappers and preprocesses env.
+#     """
+#     env = gymnasium.make(
+#         env_name, full_action_space=False, render_mode="rgb_array", frameskip=1
+#     )
+#     # Convert int to tuple as gymnasium.wrappers.ResizeObservation requires tuple
+#     if isinstance(image_size, int):
+#         image_size = (image_size, image_size)
+#     env = env_wrapper.SeedEnvWrapper(env, seed=seed)
+#     env = env_wrapper.MaxLast2FrameSkipWrapper(env, skip=4)
+#     env = gymnasium.wrappers.ResizeObservation(env, shape=image_size)
+#     env = env_wrapper.LifeLossInfo(env)
+
+#     return env
 
 
 def build_vec_env(env_names: list[str], image_size: int, env_observablity):
@@ -276,7 +276,7 @@ def joint_train_world_model_agent(
 
         # Append the transition to the replay buffer
         replay_buffer.append(
-            current_obs, action, reward, np.logical_or(done, info["life_loss"])
+            current_obs, action, reward, done  # np.logical_or(done, info["life_loss"])
         )
 
         done_flag = np.logical_or(done, truncated)
@@ -285,8 +285,16 @@ def joint_train_world_model_agent(
                 if done_flag[i]:
                     env_id = env_names[i][:16]
                     # Log reward for this environment
-                    metrics[f"sample/{env_id}_reward"] = sum_reward[i]
-                    metrics[f"sample/{env_id}_episode_steps"] = step_counters[i]
+                    # metrics[f"sample/{env_id}_reward"] = sum_reward[i]
+                    logger.log(
+                        f"sample/{env_id}_reward", sum_reward[i], step=total_steps
+                    )
+                    # metrics[f"sample/{env_id}_episode_steps"] = step_counters[i]
+                    logger.log(
+                        f"sample/{env_id}_episode_steps",
+                        step_counters[i],
+                        step=total_steps,
+                    )
                     metrics["replay_buffer/length"] = len(replay_buffer)
                     # Reset reward tracker and step counter
                     sum_reward[i] = 0
