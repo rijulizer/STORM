@@ -16,6 +16,8 @@ from sub_models.attention_blocks import (
 from sub_models.transformer_model import (
     StochasticTransformerKVCache,
     MLATransformerKVCache,
+)
+from sub_models.transformer_TEM import (
     TEMTransformerKVCache,
 )
 from sub_models.constants import DEVICE, DTYPE_16
@@ -294,7 +296,7 @@ class WorldModel(nn.Module):
             stem_channels=32,
             final_feature_width=self.final_feature_width,
         )
-        self.storm_transformer = StochasticTransformerKVCache(
+        self.storm_transformer = TEMTransformerKVCache(
             stoch_dim=self.stoch_flattened_dim,
             action_dim=action_dim,
             feat_dim=transformer_hidden_dim,
@@ -534,7 +536,7 @@ class WorldModel(nn.Module):
             self.reward_hat_buffer[:, i : i + 1] = last_reward_hat
             self.termination_hat_buffer[:, i : i + 1] = last_termination_hat
             if log_video:
-                obs_hat_list.append(last_obs_hat[:: B // 16])  # uniform sample vec_env
+                obs_hat_list.append(last_obs_hat[:: B // 4])  # uniform sample vec_env
 
         if log_video:
             try:
@@ -546,10 +548,8 @@ class WorldModel(nn.Module):
                 #     .numpy()
                 # )
                 video = torch.cat(obs_hat_list, dim=1)  # [B, T, C, H, W]
-                video = video[0]  # take batch index 0: [T, C, H, W]
-                video = (
-                    torch.clamp(video * 255.0, 0, 255).to(torch.uint8).cpu().numpy()
-                )  # uint8
+                # video = video[0]  # take batch index 0: [T, C, H, W]
+                video = torch.clamp(video * 255.0, 0, 255).to(torch.uint8).cpu().numpy()
 
                 logger.run.log(
                     {"Imagine/predict_video": wandb.Video(video, fps=4, format="mp4")}
