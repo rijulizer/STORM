@@ -70,9 +70,9 @@ def build_vec_env(env_names: list[str], image_size: int, env_observablity):
 
 def eval_episodes(
     num_episode,
-    env_name,
+    env_names,
+    env_observablity: str,
     max_steps,
-    num_envs,
     image_size,
     world_model: WorldModel,
     agent: agents.ActorCriticAgent,
@@ -80,13 +80,14 @@ def eval_episodes(
 ):
     world_model.eval()
     agent.eval()
-    vec_env = build_vec_env(env_name, image_size, num_envs=num_envs)
-    print(
-        "Current env: "
-        + colorama.Fore.YELLOW
-        + f"{env_name}"
-        + colorama.Style.RESET_ALL
-    )
+    vec_env = build_vec_env(env_names, image_size, env_observablity)
+    # print(
+    #     "Current env: "
+    #     + colorama.Fore.YELLOW
+    #     + f"{env_name}"
+    #     + colorama.Style.RESET_ALL
+    # )
+    num_envs = len(env_names)
     sum_reward = np.zeros(num_envs)
     current_obs, current_info = vec_env.reset()
     context_obs = deque(maxlen=imagine_batch_length)
@@ -122,8 +123,8 @@ def eval_episodes(
         context_action.append(action)
 
         obs, reward, done, truncated, info = vec_env.step(action)
-        # cv2.imshow("current_obs", process_visualize(obs[0]))
-        # cv2.waitKey(10)
+        cv2.imshow("current_obs", process_visualize(obs[0]))
+        cv2.waitKey(10)
 
         done_flag = np.logical_or(done, truncated)
         if done_flag.any():

@@ -296,7 +296,7 @@ class WorldModel(nn.Module):
             stem_channels=32,
             final_feature_width=self.final_feature_width,
         )
-        self.storm_transformer = TEMTransformerKVCache(
+        self.storm_transformer = StochasticTransformerKVCache(
             stoch_dim=self.stoch_flattened_dim,
             action_dim=action_dim,
             feat_dim=transformer_hidden_dim,

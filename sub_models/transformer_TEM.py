@@ -68,14 +68,16 @@ class TEMMultiHeadAttention(nn.Module):
         self.attention = TEMScaledDotProductAttention(temperature=d_e**0.5)
 
         self.dropout = nn.Dropout(dropout)
-        self.layer_norm = nn.LayerNorm(d_model, eps=1e-6)
+        # self.layer_norm_x = nn.LayerNorm(d_model, eps=1e-6)
+        self.layer_norm_e = nn.LayerNorm(d_model, eps=1e-6)
 
     def forward(self, e, x, mask=None):
         # Get the size of the batch
         B = e.size(0)
         # Get the len of the input sequences
         len_e, len_x = e.size(1), x.size(1)
-        residual = e
+        residual_e = e
+        # residual_x = x
         # Pass through the pre-attention projection: [B, L, N_head * D_x]
         # Separate different heads: [B, L, N_head, D_x]
         e = self.We(e).reshape(B, len_e, self.n_head, self.d_e)
@@ -93,9 +95,11 @@ class TEMMultiHeadAttention(nn.Module):
         # Combine the last two dimensions to concatenate all the heads together: [B, L, N_head * D_x]
         feat = feat.transpose(1, 2).contiguous().reshape(B, len_e, -1)
         feat = self.dropout(self.fc(feat))  # [B, L, N_head * D_x] -> [B, L, D_model]
-        feat += residual
-        feat = self.layer_norm(feat)
-        return feat, attn
+        # feat_x = feat + residual_x
+        feat = feat + residual_e
+        # feat_x = self.layer_norm_x(feat_x)
+        feat = self.layer_norm_e(feat)
+        return feat
 
 
 class TEMAttentionBlockKVCache(nn.Module):
@@ -108,12 +112,24 @@ class TEMAttentionBlockKVCache(nn.Module):
             feat_dim // num_heads,
             dropout=dropout,
         )
-        self.pos_ffn = PositionwiseFeedForward(feat_dim, hidden_dim, dropout=dropout)
+        # self.pos_ffn_e = PositionwiseFeedForward(feat_dim, hidden_dim, dropout=dropout)
+        self.pos_ffn_x = PositionwiseFeedForward(feat_dim, hidden_dim, dropout=dropout)
 
     def forward(self, e, x, slf_attn_mask=None):
-        output, attn = self.slf_attn(e, x, mask=slf_attn_mask)
-        output = self.pos_ffn(output)
-        return output, attn
+        """
+        Information flow:
+        1. Attention updates the memory stream `e`.
+        2. The FFN updates the content stream `x` based on the new memory.
+        """
+        # The attention sub-layer updates the memory stream 'e'.
+        # It uses the current memory 'e' to query the content 'x'.
+        e_updated = self.slf_attn(e, x, mask=slf_attn_mask)
+
+        # The feed-forward sub-layer updates the content stream 'x'.
+        # It processes the *newly updated* memory state to generate the next content representation.
+        # feat_e = self.pos_ffn_e(feat_e)
+        x_updated = self.pos_ffn_x(e_updated)
+        return e_updated, x_updated
 
 
 class RNNPositionalEncoding(nn.Module):
@@ -158,7 +174,7 @@ class RNNPositionalEncoding(nn.Module):
             num_layers=num_layers,
             batch_first=True,  # Crucial for [B, L, D] input shape
         )
-        # self.input_param = nn.Parameter(torch.zeros(1, 1, self.embed_dim))
+        self.rnn_init = nn.Parameter(torch.zeros(1, 1, self.embed_dim))
         # If the RNN's hidden dimension is different from the embedding dimension,
         # use linear layer to project it back to the correct size.
         if self.hidden_dim != embed_dim:
@@ -174,8 +190,8 @@ class RNNPositionalEncoding(nn.Module):
         # Create a dummy input tensor of zeros.
         # Shape: [B, L, embed_dim]
         # Use a trainable parameter as the input for each position (shared across positions)
-        dummy_input = torch.zeros(batch_size, seq_len, self.embed_dim, device=device)
-        # dummy_input = self.input_param.expand(batch_size, seq_len, self.embed_dim)
+        # dummy_input = torch.zeros(batch_size, seq_len, self.embed_dim, device=device)
+        dummy_input = self.rnn_init.expand(batch_size, seq_len, self.embed_dim)
 
         # The GRU returns the output (hidden states for each time step) and
         # the final hidden state. We only need the former.
@@ -295,10 +311,7 @@ class TEMTransformerKVCache(nn.Module):
         e = self.layer_norm_e(e)
 
         for layer in self.layer_stack:
-            x, attn = layer(e, x, mask)
-            # e = self.position_encoding(
-            #     x
-            # )  # FIXME: Check this logic if it woks as intended
+            e, x = layer(e, x, slf_attn_mask=mask)
 
         return x
 
@@ -327,7 +340,7 @@ class TEMTransformerKVCache(nn.Module):
 
         for idx, layer in enumerate(self.layer_stack):
             self.kv_cache_list[idx] = torch.cat([self.kv_cache_list[idx], x], dim=1)
-            x, attn = layer(e, self.kv_cache_list[idx], mask)
+            e, x = layer(e, self.kv_cache_list[idx], mask)
             # e = self.position_encoding.forward_with_position(x, position=last_pos)
 
         return x
@@ -417,3 +430,70 @@ class RNNPositionalEncodingOld(nn.Module):
             # Project to original dimension if needed
             pos_enc = self.proj(pos_enc)  # [B, 1, D]
         return pos_enc
+
+
+if __name__ == "__main__":
+
+    from sub_models.constants import DEVICE
+
+    B = 4
+    L = 64
+    D = 64 * 64
+    action_dim = 5
+
+    # Define the transformers with kv cache
+    tem_trans = TEMTransformerKVCache(
+        stoch_dim=D,
+        action_dim=5,
+        feat_dim=512,
+        num_layers=2,
+        num_heads=8,
+        max_length=L,
+        dropout=0.1,
+    ).to(device=DEVICE)
+
+
+def test_parameters():
+    # Initialize the model with some parameters
+    print(
+        f"Number of parameters TEM Transformer: {sum(p.numel() for p in tem_trans.parameters())}"
+    )
+
+
+def test_forward():
+
+    samples = torch.randn(B, L, D).to(device=DEVICE)
+    action = torch.randint(0, 1, size=(B, L)).to(device=DEVICE)
+    # action = F.one_hot(action.long(), action_dim).float()
+    print(samples.shape, action.shape)
+    temporal_mask = None  # get_subsequent_mask(latent)
+    op_tem = tem_trans.forward(samples, action, temporal_mask)
+
+    print(f"Output shape TEM Transformer: {op_tem.shape}")
+    assert op_tem.shape == (B, L, 512), "Output shape mismatch for TEM Transformer"
+
+
+def test_cache():
+    samples = torch.randn(B, L, D).to(device=DEVICE)
+    action = torch.randint(0, 1, size=(B, L)).to(device=DEVICE)
+    # action = F.one_hot(action.long(), action_dim).float()
+    print(samples.shape, action.shape)
+    temporal_mask = None  # get_subsequent_mask(latent)\
+    # REset the kv_cache_list
+    tem_trans.reset_kv_cache_list(B, samples.dtype)
+    print(f"Init KV kache shape of TEM Transformer: {tem_trans.kv_cache_list[0].shape}")
+
+    # Forward pass with kv_cache
+    tem_trans.forward_with_kv_cache(samples[:, 0:1], action[:, 0:1])
+    print(f"forward call 1, TEM KV cache shape: {tem_trans.kv_cache_list[0].shape}")
+
+    tem_trans.forward_with_kv_cache(samples[:, 1:2], action[:, 1:2])
+    print(f"forward call 2, TEM KV cache shape: {tem_trans.kv_cache_list[0].shape}")
+
+
+if __name__ == "__main__":
+    test_parameters()
+    print("/n/n Testing forward pass")
+    test_forward()
+    print("/n/n Testing forward pass with kv_cache")
+    test_cache()
