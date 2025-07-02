@@ -227,8 +227,8 @@ def joint_train_world_model_agent(
     sum_reward = np.zeros(num_envs)
     step_counters = np.zeros(num_envs, dtype=int)
     current_obs, current_info = vec_env.reset()  # [E, 64, 64, 3] #E=num_envs
-    context_obs = deque(maxlen=16)
-    context_action = deque(maxlen=16)
+    context_obs = deque(maxlen=imagine_batch_length)
+    context_action = deque(maxlen=imagine_batch_length)
 
     # sample and train
     for total_steps in tqdm(range(max_steps)):

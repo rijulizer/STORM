@@ -1,5 +1,7 @@
 import gymnasium
+import minigrid
 import argparse
+from functools import partial
 from tensorboardX import SummaryWriter
 import cv2
 import numpy as np
@@ -33,25 +35,35 @@ def process_visualize(img):
     return img
 
 
-def build_single_env(env_name, image_size):
-    env = gymnasium.make(
-        env_name, full_action_space=False, render_mode="rgb_array", frameskip=1
-    )
+def build_single_env(env_name: str, image_size: int, env_observablity: str = "Full"):
+    """
+    Build a single env with wrappers and preprocesses env.
+    """
+    env = gymnasium.make(env_name, render_mode="rgb_array")
     # Convert int to tuple as gymnasium.wrappers.ResizeObservation requires tuple
     if isinstance(image_size, int):
         image_size = (image_size, image_size)
-    env = env_wrapper.MaxLast2FrameSkipWrapper(env, skip=4)
+    if env_observablity == "Full":
+        env = minigrid.wrappers.RGBImgObsWrapper(env)
+    elif env_observablity == "Partial":
+        env = minigrid.wrappers.RGBImgPartialObsWrapper(env)
+    else:
+        raise ValueError(f"Unknown env observability {env_observablity}")
+    env = minigrid.wrappers.ImgObsWrapper(env)  # Sets obs = obs["rgb"], discards others
     env = gymnasium.wrappers.ResizeObservation(env, shape=image_size)
+    # env = env_wrapper.LifeLossInfo(env)
+
     return env
 
 
-def build_vec_env(env_name, image_size, num_envs):
-    # lambda pitfall refs to: https://python.plainenglish.io/python-pitfalls-with-variable-capture-dcfc113f39b7
-    def lambda_generator(env_name, image_size):
-        return lambda: build_single_env(env_name, image_size)
-
-    env_fns = []
-    env_fns = [lambda_generator(env_name, image_size) for i in range(num_envs)]
+def build_vec_env(env_names: list[str], image_size: int, env_observablity):
+    """
+    Build a vectorized env with n=num_envs parallel envs.
+    """
+    env_fns = [
+        partial(build_single_env, env_name, image_size, env_observablity)
+        for env_name in env_names
+    ]
     vec_env = gymnasium.vector.AsyncVectorEnv(env_fns=env_fns)
     return vec_env
 
@@ -64,6 +76,7 @@ def eval_episodes(
     image_size,
     world_model: WorldModel,
     agent: agents.ActorCriticAgent,
+    imagine_batch_length=32,
 ):
     world_model.eval()
     agent.eval()
@@ -76,8 +89,8 @@ def eval_episodes(
     )
     sum_reward = np.zeros(num_envs)
     current_obs, current_info = vec_env.reset()
-    context_obs = deque(maxlen=16)
-    context_action = deque(maxlen=16)
+    context_obs = deque(maxlen=imagine_batch_length)
+    context_action = deque(maxlen=imagine_batch_length)
 
     final_rewards = []
     # for total_steps in tqdm(range(max_steps//num_envs)):
