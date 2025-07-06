@@ -299,32 +299,89 @@ class MLATransformerKVCache(nn.Module):
 
 
 if __name__ == "__main__":
+    B = 3
+    L = 16
+    D = 64
+    action_dim = 5
 
-    transformer = StochasticTransformer(
-        stoch_dim=64 * 64,
-        action_dim=10,
+    # Define the transformers with kv cache
+    trans = StochasticTransformerKVCache(
+        stoch_dim=D,
+        action_dim=action_dim,
         feat_dim=512,
         num_layers=2,
         num_heads=8,
-        max_length=64,
+        max_length=L,
         dropout=0.1,
-    )
-    # print number of parameters and model architecture
-    # print(f"Number of parameters: {sum(p.numel() for p in transformer.parameters())}")
-    # # 8.7 M parameters
-    # print(transformer)
-    transformer_kv = StochasticTransformerKVCache(
-        stoch_dim=64 * 64,
-        action_dim=10,
-        feat_dim=512,
-        num_layers=2,
-        num_heads=8,
-        max_length=64,
-        dropout=0.1,
-    )
-    # print number of parameters and model architecture
-    # print(
-    #     f"Number of parameters: {sum(p.numel() for p in transformer_kv.parameters())}"
+    ).to(device=DEVICE)
+
+    def test_parameters():
+        # Initialize the model with some parameters
+        print(
+            f"Number of parameters TEM Transformer: {sum(p.numel() for p in trans.parameters())}"
+        )
+
+    def test_forward():
+
+        samples = torch.randn(B, L, D).to(device=DEVICE)
+        action = torch.randint(0, 1, size=(B, L)).to(device=DEVICE)
+        # action = F.one_hot(action.long(), action_dim).float()
+        print(samples.shape, action.shape)
+        temporal_mask = None  # get_subsequent_mask(latent)
+        op_tem = trans.forward(samples, action, temporal_mask)
+
+        print(f"Output shape TEM Transformer: {op_tem.shape}")
+        assert op_tem.shape == (B, L, 512), "Output shape mismatch for TEM Transformer"
+
+    def test_cache():
+        samples = torch.randn(B, L, D).to(device=DEVICE)
+        action = torch.randint(0, 1, size=(B, L)).to(device=DEVICE)
+        # action = F.one_hot(action.long(), action_dim).float()
+        print(samples.shape, action.shape)
+        temporal_mask = None
+        # REset the kv_cache_list
+        trans.reset_kv_cache_list(B, samples.dtype)
+
+        # Forward pass with kv_cache
+        trans.forward_with_kv_cache(samples[:, 0:1], action[:, 0:1])
+        print(f"forward call 1, TEM KV cache shape: {trans.kv_cache_list[0].shape}")
+
+        print(f"\nInit KV kache shape/value")
+        trans.forward_with_kv_cache(samples[:, 1:2], action[:, 1:2])
+        print(f"forward call 2, TEM KV cache shape: {trans.kv_cache_list[0].shape}")
+
+    print("\n\n!-----Testing Init-----!")
+    test_parameters()
+    print("\n\n!-----Testing forward pass-----!")
+    test_forward()
+    print("\n\n!-----Test Forwardpass with KV cache-----!")
+    test_cache()
+
+    # transformer = StochasticTransformer(
+    #     stoch_dim=64 * 64,
+    #     action_dim=10,
+    #     feat_dim=512,
+    #     num_layers=2,
+    #     num_heads=8,
+    #     max_length=64,
+    #     dropout=0.1,
     # )
-    # # 6.6 M parameters
-    # print(transformer_kv)
+    # # print number of parameters and model architecture
+    # # print(f"Number of parameters: {sum(p.numel() for p in transformer.parameters())}")
+    # # # 8.7 M parameters
+    # # print(transformer)
+    # transformer_kv = StochasticTransformerKVCache(
+    #     stoch_dim=64 * 64,
+    #     action_dim=10,
+    #     feat_dim=512,
+    #     num_layers=2,
+    #     num_heads=8,
+    #     max_length=64,
+    #     dropout=0.1,
+    # )
+    # # print number of parameters and model architecture
+    # # print(
+    # #     f"Number of parameters: {sum(p.numel() for p in transformer_kv.parameters())}"
+    # # )
+    # # # 6.6 M parameters
+    # # print(transformer_kv)
