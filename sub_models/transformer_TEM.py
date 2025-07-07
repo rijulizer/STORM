@@ -356,7 +356,7 @@ class TEMTransformerKVCache(nn.Module):
 
             e, x = layer(e, self.cache["e_k"][idx], self.cache["x_v"][idx], mask)
 
-        return e  # TODO: what should be the output? x or e?
+        return x  # TODO: what should be the output? x or e?
 
 
 if __name__ == "__main__":
