@@ -1,4 +1,5 @@
 import torch
+from sub_models.constants import DEVICE, DTYPE_16
 from sub_models.director_agents import GoalEncoder, GoalDecoder, DirectorAgent
 
 # Write some sample example cases for GoalEncoder and GoalDecoder
@@ -26,26 +27,31 @@ imagine_rollout = {
     "goal": wm_sample,
     "skill": skill,
 }
-
+print("------- Test GoalEncoder-------")
 ## Test Encoder model
-goal_encoder = GoalEncoder(wm_hidden_dim, skill_dim)
+goal_encoder = GoalEncoder(wm_hidden_dim, (skill_dim, skill_dim))
 endoer_op = goal_encoder(wm_sample)
 
 print(f"\n\nEncoder smaple shape: {endoer_op.sample().shape}")
 print(f"Encoder smaple example: {endoer_op.sample()[0][0]}")
 
+print("\n------- Test GoalDecoder-------")
 ## Test Decoder model
-goal_decoder = GoalDecoder(skill_dim, wm_hidden_dim)
+goal_decoder = GoalDecoder((skill_dim, skill_dim), wm_hidden_dim)
 decoder_op = goal_decoder(endoer_op.sample())
 print(f"\n\nDecoder dist mode shape: {decoder_op.mode().shape}")
 print(f"Decoder dist mode sample: {decoder_op.mode()[0][0]}")
-print(f"Decoder dist log_prob shape: {decoder_op.log_prob(feat).shape}")
+print(f"Decoder dist log_prob shape: {decoder_op.log_prob(wm_sample).shape}")
 
 
+print("\n------- Test Goal VAE Training-------")
 ## Define the DirectorAgent
-agent = DirectorAgent(wm_hidden_dim, wm_sample_dim, wm_action_dim)
-
+agent = DirectorAgent(wm_hidden_dim, wm_sample_dim, wm_action_dim).to(DEVICE)
 
 # ## Test tarin-goal-vae step
-# director_agent.train_goal_vae_step(imagine_rollout)
-# print(f"\nMetrics after training: {director_agent.metrics}")
+# Move all tensors in imagine_rollout to DEVICE
+imagine_rollout_on_device = {
+    k: v.to(DEVICE) if torch.is_tensor(v) else v for k, v in imagine_rollout.items()
+}
+metrics = agent.train_goal_vae_step(imagine_rollout_on_device)
+print(f"\nMetrics after training: {metrics}")
