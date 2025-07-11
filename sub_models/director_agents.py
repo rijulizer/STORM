@@ -21,26 +21,24 @@ def percentile(x, percentage):
         sorted_x, _ = torch.sort(flat_x)
         per = sorted_x[kth]
     else:
-        per = torch.kthvalue(flat_x, kth + 1).values
+        per = torch.kthvalue(flat_x, kth).values
     return per
 
 
 def calc_lambda_return(rewards, values, termination, gamma, lam, dtype=torch.float32):
-    # Invert termination to have 0 if the episode ended and 1 otherwise
-    inv_termination = (termination * -1) + 1
 
-    batch_size, batch_length = rewards.shape[:2]
+    # Invert termination to have 0 if the episode ended and 1 otherwise
+    continuation = (termination * -1) + 1
+
+    B, L = rewards.shape[:2]
     # gae_step = torch.zeros((batch_size, ), dtype=dtype, device=device)
-    gamma_return = torch.zeros(
-        (batch_size, batch_length + 1), dtype=dtype, device=DEVICE
-    )
+    gamma_return = torch.zeros((B, L + 1), dtype=dtype, device=DEVICE)
     gamma_return[:, -1] = values[:, -1]
-    for t in reversed(range(batch_length)):  # with last bootstrap
-        gamma_return[:, t] = (
-            rewards[:, t]
-            + gamma * inv_termination[:, t] * (1 - lam) * values[:, t]
-            + gamma * inv_termination[:, t] * lam * gamma_return[:, t + 1]
+    for t in reversed(range(L)):  # with last bootstrap
+        gamma_return[:, t] = rewards[:, t] + gamma * continuation[:, t] * (
+            (1 - lam) * values[:, t] + lam * gamma_return[:, t + 1]
         )
+    # TODO: #[:, :-1] not needed as the sample and hidden extra element is already removed
     return gamma_return[:, :-1]
 
 
@@ -66,6 +64,7 @@ class BaseAgent(nn.Module):
         self.input_dim = input_dim
         self.action_dim = action_dim
         if isinstance(action_dim, tuple):
+            # for manager the action_dim is a tuple (K, K)
             self.action_dim_flatten = action_dim[0] * action_dim[1]
         else:
             self.action_dim_flatten = action_dim
@@ -89,7 +88,7 @@ class BaseAgent(nn.Module):
             nn.LayerNorm(self.hidden_dim),
             nn.ReLU(),
         ]
-        for i in range(self.num_layers - 2):
+        for i in range(self.num_layers - 1):
             actor_model.extend(
                 [
                     nn.Linear(self.hidden_dim, self.hidden_dim, bias=True),
@@ -194,7 +193,7 @@ class BaseAgent(nn.Module):
         value = self.symlog_twohot_loss.decode(value)
         return value
 
-    def update(self, traj, logger=None):
+    def update(self, traj):
         """
         Update policy and value models using imagine rollout.
         Args:
@@ -202,23 +201,23 @@ class BaseAgent(nn.Module):
                 and other important entities.
         """
         metrics = {}
-        # All have the shape [B, L, *]
-        hidden = traj["hidden"]  # The hidden state from WM
-        sample = traj["sample"]  # The sample from WM
-        # reward = imagine_rollout["reward"]
-        action = traj["action"]  # [B, L]
-        # cont = imagine_rollout["cont"]
-        termination = traj["termination"]
-        goal = traj.get("goal", None)
-        if goal is not None:
-            # for the case of worker the goal is also part of latent
-            latent = torch.cat((sample, hidden, goal), dim=-1)  # [B, L, 3*]
-        else:
-            latent = torch.cat((sample, hidden), dim=-1)  # [B, L, 2*]
         self.train()
         with torch.autocast(
             device_type=DEVICE.type, dtype=DTYPE_16, enabled=self.use_amp
         ):
+            # All have the shape [B, L, *]
+            hidden = traj["hidden"]  # The hidden state from WM
+            sample = traj["sample"]  # The sample from WM
+            # reward = imagine_rollout["reward"]
+            action = traj["action"]
+            # cont = imagine_rollout["cont"]
+            termination = traj["termination"]
+            goal = traj.get("goal", None)
+            if goal is not None:
+                # for the case of worker the goal is also part of latent
+                latent = torch.cat((sample, hidden, goal), dim=-1)  # [B, L, 3*]
+            else:
+                latent = torch.cat((sample, hidden), dim=-1)  # [B, L, 2*]
             # Get action logits using actor model
             # action_logits = self.actor(latent)
             # # [B, L, action_dim]
@@ -272,9 +271,7 @@ class BaseAgent(nn.Module):
                 lower_bound = self.lowerbound_ema(percentile(lambda_return, 0.05))
                 upper_bound = self.upperbound_ema(percentile(lambda_return, 0.95))
                 S = upper_bound - lower_bound
-                norm_ratio = torch.max(
-                    torch.ones(1).to(DEVICE), S
-                )  # max(1, S) in the paper
+                norm_ratio = torch.max(torch.ones(1).to(DEVICE), S)
                 norm_aqdvantages.append(
                     (lambda_return - value) / norm_ratio
                 )  # [:, :-1]
@@ -291,7 +288,7 @@ class BaseAgent(nn.Module):
             entropy_loss = action_dist.entropy().mean()
 
             # Calculate total loss
-            loss = policy_loss + total_critic_loss - self.entropy_coef * entropy_loss
+            loss = policy_loss + total_critic_loss - (self.entropy_coef * entropy_loss)
 
         # gradient descent
         if self.scaler is not None:
@@ -314,15 +311,6 @@ class BaseAgent(nn.Module):
         metrics["AC/S"] = S.item()
         metrics["AC/norm_ratio"] = norm_ratio.item()
         metrics["AC/total_loss"] = loss.item()
-        # Log metrics
-        if logger is not None:
-            logger.log("AC/policy_loss", policy_loss.item())
-            logger.log("AC/critic_loss", total_critic_loss.item())
-            logger.log("AC/entropy_loss", entropy_loss.item())
-            logger.log("AC/S", S.item())
-            logger.log("AC/norm_ratio", norm_ratio.item())
-            logger.log("AC/total_loss", loss.item())
-
         return metrics
 
 
@@ -448,7 +436,6 @@ class DirectorAgent(nn.Module):
         self.wm_feat_dim = wm_sample_dim + wm_hidden_dim  # WM latent dim
         self.skill_duration = 8  # config
         self.skill_shape = (8, 8)  # config
-        # self.skill_shape_flatten = self.skill_shape[0] * self.skill_shape[1]
         self.goal_encoder = GoalEncoder(self.wm_sample_dim, self.skill_shape)
         self.goal_decoder = GoalDecoder(self.skill_shape, self.wm_sample_dim)
         self.manager = BaseAgent(
@@ -466,7 +453,7 @@ class DirectorAgent(nn.Module):
             ],
             input_dim=self.wm_feat_dim + self.wm_sample_dim,  # goal_dim = wm_sample_dim
             action_dim=wm_action_dim,
-            actor_dist="Categorical",  # TODO: check teh distribution worker
+            actor_dist="Categorical",  # TODO: check the distribution worker
         )
         self.skill_prior = self.get_skill_prior()
         self.discount = 0.99  # config
@@ -525,6 +512,7 @@ class DirectorAgent(nn.Module):
     def extr_reward(self, imagine_rollout):
         """
         Returns the actual reward based on the imagined rollout.
+        Used my the manager.
         """
         return imagine_rollout["reward"]
 
@@ -532,6 +520,8 @@ class DirectorAgent(nn.Module):
     def explr_reward(self, imagine_rollout):
         """
         Computes the ELBO reward based on the imagined rollout.
+        This is the reconstruction loss of the goal encoder-decoder.
+        Used by the manager.
         """
         wm_sample = imagine_rollout["sample"]  # [B, L, Z]
         # Get encoded distribution
@@ -541,14 +531,17 @@ class DirectorAgent(nn.Module):
         # Compute ELBO reward: MSE bteween decoded and actual
         # the OP shape: [B, L]
         reward = ((decoded_dist.mode() - wm_sample) ** 2).mean(-1)
-        # return second element onwards [B, L]
-        return reward  # [:, 1:][B, L-1]
+        # return second element onwards [B, L-1]
+        # Becuase usually sample and hidden has one exra element in the initail point
+        # So for sample L=17 when imagine_rollout is 16 steps long
+        return reward[:, 1:]
 
     @torch.no_grad()
     def goal_reward(self, imagine_rollout):
         """
         Cosine Max similarity
         Calculate reward based on the goal and the transition state.
+        Used by the worker.
         """
         wm_sample = imagine_rollout["sample"]
         goal = self.carry["goal"]
@@ -558,29 +551,23 @@ class DirectorAgent(nn.Module):
         ).clamp_min(1e-12)
         # [B, L, Z] -> [B, L]
         reward = (goal / norm * wm_sample / norm).sum(dim=-1)
-        # return the second element onward [B, L]
-        return reward  # [:, 1:]
+        # return the second element onward [B, L-1]
+        # Becuase usually sample and hidden has one exra element in the initail point
+        # so for sample L=17 when imagine_rollout is 16 steps long
+        return reward[:, 1:]
 
     @torch.no_grad()
     def policy_step(self, latent):  # , goal, skill):
         """
-        Hierarchical policy step function. First decides whether to update the goal from the manager.
-        Then based on the goal, get the workers action logits. Policy step expects one slice of time dim L=1.
-        Args: Latent: The latent state from the world model. cat([sample, hidden]) [B, 1, 2Z]
+        Hierarchical policy step function.
+        First, decides whether to update the goal based on step count.
+        Then based on the goal, get the workers action logits.
+        Policy step expects one slice of time dim L=1. B dim can indicate the number of envs as well.
+        Args:
+            Latent: The latent state from the world model. cat([sample, hidden]) [B, 1, 2Z]
         Returns:
             action_dist: A torch distribution object for actions.
-            goal: Existing goal.
-            skill: Existing skill.
         """
-        # if goal is None:  # FIXME: Think in this logic, what happens first few rounds
-        #     goal = torch.zeros(latent.shape[0], latent.shape[1], self.wm_sample_dim)
-        # if skill is None:
-        #     skill = torch.zeros(
-        #         latent.shape[0],
-        #         latent.shape[1],
-        #         self.skill_shape[0],
-        #         self.skill_shape[1],
-        #     )
         goal = self.carry["goal"]  # [B, 1, Z]
         skill = self.carry["skill"]  # [B, 1, K, K]
         step = self.carry["step"]
@@ -617,10 +604,10 @@ class DirectorAgent(nn.Module):
         # Finally generate primitive action distribution
         action_dist = self.worker.policy(worker_input)
         # TODO: Have mechnanism to save the goal for visualization
-        # Update the carry state
-        self.carry["step"] += 1  # everytime the policy step is called
+        # Update the carry state everytime the policy step is called
+        self.carry["step"] += 1
 
-        return action_dist  # , goal, skill
+        return action_dist
 
     @torch.no_grad()
     def sample(self, latent, greedy=False):
@@ -692,9 +679,9 @@ class DirectorAgent(nn.Module):
             torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1000.0)
             self.optimizer.step()
         # --- Metrics ---
-        metrics["Director/goal_recon_loss"] = recon_loss.mean().item()
-        metrics["Director/goal_kl_loss"] = kl_loss.mean().item()
-        metrics["Director/goal_VAE_loss"] = vae_loss.item()
+        metrics["Agent/goal_recon_loss"] = recon_loss.mean().item()
+        metrics["Agent/goal_kl_loss"] = kl_loss.mean().item()
+        metrics["Agent/goal_VAE_loss"] = vae_loss.item()
 
         return metrics
 
@@ -720,6 +707,22 @@ class DirectorAgent(nn.Module):
         metrics.update({f"Manager_{k}": v for k, v in mets.items()})
         return imagine_rollout, metrics
 
+    def rehsape_traj(self, entity):
+        """
+        Reshape the trajectory entity to have the shape [B, N, K, *]
+        where B is the batch size, N is the number of sub-trajectories,
+        K is the skill duration, and * is the feature dimension(s).
+        """
+        k = self.skill_duration
+        B, L = entity.shape[0], entity.shape[1]
+        N = L // k  # Number of sub-trajectories
+        if L % k != 0:
+            # Mostly the case with sample and hidden which has one extra element
+            entity = entity[:, : N * k, :]  # Trim to make sure L is divisible by K
+
+        # Reshape the entity to have the shape [B, N, K, *]
+        return entity.reshape(B, N, k, *entity.shape[2:])
+
     def manager_traj(self, imagine_rollout: dict) -> dict:
         """
         Modify trajectory to be used for training the manager.
@@ -735,24 +738,22 @@ class DirectorAgent(nn.Module):
         traj.pop("reward")
         # remove the goal from the manager's trajectory; its not used in actor critics
         traj.pop("goal")
-        traj["cont"] = 1 - traj["termination"]  # [1,1,1,0] -> [0,0,0,1] # [B, L]
-        k = self.skill_duration  # Skill duration\
-        reshape = lambda x: x.reshape(x.shape[0], x.shape[1] // k, k, *x.shape[2:])
+        traj["cont"] = 1 - traj["termination"]  # [0,0,0,1] -> [1,1,1,0] ->  # [B, L]
         for key, value in traj.items():
             # For the manager the reward is the mean of the rewards in the skill duration
-            if "reward" in key:
+            if "reward" in key:  # [reward_extr, reward_expl, reward_goal]
                 # Compute weights for continuity along skill duration dimension
                 # all the elements after zero would be 0; else 1
                 weights = torch.cumprod((traj["cont"]), dim=1)  # B, L, 1
                 # Average rewards weighted by continuity along N dimension
                 # [B, L, *] -> [B, N, L, *] -> [B, N, *]
-                traj[key] = reshape(value * weights).mean(dim=2)
+                traj[key] = self.rehsape_traj(value * weights).mean(dim=2)
             elif key in ["cont", "termination"]:
                 # prod along the skill duration dimension. If one element is 0 then the product is 0
-                traj[key] = reshape(value).prod(dim=2)  # [B, L]- > [B, N]
+                traj[key] = self.rehsape_traj(value).prod(dim=2)  # [B, L]- > [B, N]
             else:  # [hidden, sample, action]
                 # take the first one from every K
-                traj[key] = reshape(value)[:, :, 0, :]  # [B, N, Z]
+                traj[key] = self.rehsape_traj(value)[:, :, 0, :]  # [B, N, Z]
 
         # Compute trajectory weights
         traj["weight"] = (
@@ -772,12 +773,9 @@ class DirectorAgent(nn.Module):
         # also pop the world model reward as its present as extr_reward
         traj.pop("reward")
         traj["cont"] = 1 - traj["termination"]
-        # TODO: Worker trajectory should have goal
-        k = self.skill_duration  # Skill duration
-        # Helper function to reshape tensors
-        reshape = lambda x: x.reshape(x.shape[0], x.shape[1] // k, k, *x.shape[2:])
+
         for key, val in traj.items():
-            val = reshape(val)  # [B, N, K, *]
+            val = self.rehsape_traj(val)  # [B, N, K, *]
             # Flatten batch dimensions (N and B) into a single dimension
             val = val.reshape(
                 val.shape[0] * val.shape[1], -1, *val.shape[3:]

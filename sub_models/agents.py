@@ -177,9 +177,7 @@ class ActorCriticAgent(nn.Module):
             termination = imagine_rollout["termination"]
 
             logits, raw_value = self.get_logits_raw_value(latent)
-            dist = distributions.Categorical(
-                logits=logits[:, :-1]
-            )  # FIXME this is not needed anymore as wm.imagine has been changed
+            dist = distributions.Categorical(logits=logits[:, :-1])
             log_prob = dist.log_prob(action)
             entropy = dist.entropy()
 
@@ -196,11 +194,11 @@ class ActorCriticAgent(nn.Module):
             # update value function with slow critic regularization
             value_loss = self.symlog_twohot_loss(
                 raw_value[:, :-1],
-                lambda_return.detach(),  # FIXME: raw_value[:, :-1], raw_value
+                lambda_return.detach(),
             )
             slow_value_regularization_loss = self.symlog_twohot_loss(
                 raw_value[:, :-1],
-                slow_lambda_return.detach(),  # FIXME: raw_value[:, :-1], raw_value
+                slow_lambda_return.detach(),
             )
 
             lower_bound = self.lowerbound_ema(percentile(lambda_return, 0.05))
@@ -209,9 +207,7 @@ class ActorCriticAgent(nn.Module):
             norm_ratio = torch.max(
                 torch.ones(1).to(DEVICE), S
             )  # max(1, S) in the paper
-            norm_advantage = (
-                lambda_return - value[:, :-1]
-            ) / norm_ratio  # FIXME: value[:, :-1], value
+            norm_advantage = (lambda_return - value[:, :-1]) / norm_ratio
             policy_loss = -(log_prob * norm_advantage.detach()).mean()
 
             entropy_loss = entropy.mean()
