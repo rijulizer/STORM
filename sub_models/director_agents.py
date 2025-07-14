@@ -79,7 +79,7 @@ class BaseAgent(nn.Module):
         self.lambd = 0.95  # config
         self.entropy_coef = 3e-4  # config TODO: Check this
         self.use_amp = True
-        self.tensor_dtype = torch.float16 if self.use_amp else torch.float32
+        self.tensor_dtype = DTYPE_16 if self.use_amp else torch.float32
         self.symlog_twohot_loss = SymLogTwoHotLoss(255, -20, 20)
 
         # Sequential actor model to map from feat_dim to action_dim
@@ -645,43 +645,45 @@ class DirectorAgent(nn.Module):
         metrics = {}
         self.goal_encoder.train()
         self.goal_decoder.train()
+        with torch.autocast(
+            device_type=DEVICE.type, dtype=DTYPE_16, enabled=self.use_amp
+        ):
+            wm_sample = imagine_rollout["sample"]  # [B, L, Z]
 
-        wm_sample = imagine_rollout["sample"]  # [B, L, Z]
+            # --- Forward pass ---
+            # Get encoded distribution
+            encoded_dist = self.goal_encoder(wm_sample)  # q(z|x)
+            skill_sample = encoded_dist.sample()
+            # Get decoded distribution
+            decoded_dist = self.goal_decoder(skill_sample)  # p(x|z)
+            # Reconstruction loss (negative log-likelihood)
+            # [B, L] -> [B]
+            recon_loss = -decoded_dist.log_prob(wm_sample.detach()).mean(-1)
+            # KL divergence
+            # [B, L] -> [B]
+            kl_loss = torch.distributions.kl_divergence(
+                encoded_dist, self.skill_prior
+            ).mean((-2, -1))
+            kl_coef = self.kl_controller.update(kl_loss.detach().cpu())
 
-        # --- Forward pass ---
-        # Get encoded distribution
-        encoded_dist = self.goal_encoder(wm_sample)  # q(z|x)
-        skill_sample = encoded_dist.sample()
-        # Get decoded distribution
-        decoded_dist = self.goal_decoder(skill_sample)  # p(x|z)
-        # Reconstruction loss (negative log-likelihood)
-        # [B, L] -> [B]
-        recon_loss = -decoded_dist.log_prob(wm_sample.detach()).mean(-1)
-        # KL divergence
-        # [B, L] -> [B]
-        kl_loss = torch.distributions.kl_divergence(
-            encoded_dist, self.skill_prior
-        ).mean((-2, -1))
-        kl_coef = self.kl_controller.update(kl_loss.detach().cpu())
+            vae_loss = (recon_loss + kl_coef * kl_loss).mean()  # [B] -> scalar
 
-        vae_loss = (recon_loss + kl_coef * kl_loss).mean()  # [B] -> scalar
-
-        # --- Backward pass for VAE only ---
-        self.optimizer.zero_grad(set_to_none=True)
-        if self.scaler is not None:
-            self.scaler.scale(vae_loss).backward()
-            self.scaler.unscale_(self.optimizer)
-            torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1000.0)
-            self.scaler.step(self.optimizer)
-            self.scaler.update()
-        else:
-            vae_loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1000.0)
-            self.optimizer.step()
-        # --- Metrics ---
-        metrics["Agent/goal_recon_loss"] = recon_loss.mean().item()
-        metrics["Agent/goal_kl_loss"] = kl_loss.mean().item()
-        metrics["Agent/goal_VAE_loss"] = vae_loss.item()
+            # --- Backward pass for VAE only ---
+            self.optimizer.zero_grad(set_to_none=True)
+            if self.scaler is not None:
+                self.scaler.scale(vae_loss).backward()
+                self.scaler.unscale_(self.optimizer)
+                torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1000.0)
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+            else:
+                vae_loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1000.0)
+                self.optimizer.step()
+            # --- Metrics ---
+            metrics["Agent/goal_recon_loss"] = recon_loss.mean().item()
+            metrics["Agent/goal_kl_loss"] = kl_loss.mean().item()
+            metrics["Agent/goal_VAE_loss"] = vae_loss.item()
 
         return metrics
 
@@ -692,19 +694,22 @@ class DirectorAgent(nn.Module):
             imagine_rollout: A dictionary containing imagined rollout data from the  WM.
         """
         metrics = {}
-        imagine_rollout["reward_extr"] = self.extr_reward(imagine_rollout)
-        imagine_rollout["reward_expl"] = self.explr_reward(imagine_rollout)
-        imagine_rollout["reward_goal"] = self.goal_reward(imagine_rollout)
-        # imagine_rollout["delta"] = imagine_rollout["goal"] - imagine_rollout["sample"]
+        with torch.autocast(
+            device_type=DEVICE.type, dtype=DTYPE_16, enabled=self.use_amp
+        ):
+            imagine_rollout["reward_extr"] = self.extr_reward(imagine_rollout)
+            imagine_rollout["reward_expl"] = self.explr_reward(imagine_rollout)
+            imagine_rollout["reward_goal"] = self.goal_reward(imagine_rollout)
+            # imagine_rollout["delta"] = imagine_rollout["goal"] - imagine_rollout["sample"]
 
-        # generate the manager and worker trajectories
-        manager_traj = self.manager_traj(imagine_rollout)
-        worker_traj = self.worker_traj(imagine_rollout)
-        # Train the manager and worker
-        mets = self.worker.update(worker_traj)
-        metrics.update({f"Worker_{k}": v for k, v in mets.items()})
-        mets = self.manager.update(manager_traj)
-        metrics.update({f"Manager_{k}": v for k, v in mets.items()})
+            # generate the manager and worker trajectories
+            manager_traj = self.manager_traj(imagine_rollout)
+            worker_traj = self.worker_traj(imagine_rollout)
+            # Train the manager and worker
+            mets = self.worker.update(worker_traj)
+            metrics.update({f"Worker_{k}": v for k, v in mets.items()})
+            mets = self.manager.update(manager_traj)
+            metrics.update({f"Manager_{k}": v for k, v in mets.items()})
         return imagine_rollout, metrics
 
     def rehsape_traj(self, entity):

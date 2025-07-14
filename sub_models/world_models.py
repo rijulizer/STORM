@@ -296,7 +296,7 @@ class WorldModel(nn.Module):
             stem_channels=32,
             final_feature_width=self.final_feature_width,
         )
-        self.storm_transformer = TEMTransformerKVCache(
+        self.storm_transformer = StochasticTransformerKVCache(
             stoch_dim=self.stoch_flattened_dim,
             action_dim=action_dim,
             feat_dim=transformer_hidden_dim,
@@ -460,7 +460,7 @@ class WorldModel(nn.Module):
 
     def imagine_data(
         self,
-        agent: ActorCriticAgent,
+        agent: DirectorAgent,  # ActorCriticAgent,
         buffer_sample,
         imagine_batch_size,
         imagine_batch_length,
@@ -505,10 +505,6 @@ class WorldModel(nn.Module):
                 ],
                 dim=-1,  # [B, 1, Z+Z]
             )
-            # # load goal from the r
-            # exist_goal = buffer_sample["goal"][:, i : i + 1]
-            # exist_skill = buffer_sample["skill"][:, i : i + 1]
-
             action = agent.sample(latent)  # , exist_goal, exist_skill)
             # Add action, goal skill to the buffer
             self.action_buffer[:, i : i + 1] = action
@@ -540,21 +536,32 @@ class WorldModel(nn.Module):
 
         if log_video:
             try:
-                # video = (
-                #     torch.clamp(torch.cat(obs_hat_list, dim=1), 0, 1)
-                #     .cpu()
-                #     .float()
-                #     .detach()
-                #     .numpy()
+                obs_frames = torch.cat(obs_hat_list, dim=1)  # [B, T, C, H, W]
+                obs_frames = (
+                    torch.clamp(obs_frames * 255.0, 0, 255)
+                    .to(torch.uint8)
+                    .cpu()
+                    .numpy()
+                )
+                # taken_actions = (
+                #     self.action_buffer[:: B // 4, :L].to(torch.uint8).cpu().numpy()
                 # )
-                video = torch.cat(obs_hat_list, dim=1)  # [B, T, C, H, W]
-                # video = video[0]  # take batch index 0: [T, C, H, W]
-                video = torch.clamp(video * 255.0, 0, 255).to(torch.uint8).cpu().numpy()
+                # print(
+                #     f"DEBUG: obs_frames shape: {obs_frames.shape}, taken_actions shape: {taken_actions.shape}"
+                # )
+                # print(
+                #     f"DEBUG: obs_frames type: {type(obs_frames)}, taken_actions type: {type(taken_actions)}"
+                # )
+                # processed_video = create_obs_action_frame(obs_frames, taken_actions)
 
                 logger.run.log(
-                    {"Imagine/predict_video": wandb.Video(video, fps=4, format="mp4")}
+                    {
+                        "Imagine/predict_video": wandb.Video(
+                            obs_frames, fps=4, format="mp4"
+                        )
+                    }
                 )
-            except Exception:
+            except Exception as e:
                 pass
         # ensure the last token is removed to make the length of the buffer same
         # [B, L+1, C] -> [B, L, C]

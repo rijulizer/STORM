@@ -47,7 +47,6 @@ class ActorCriticAgent(nn.Module):
         self.lambd = lambd
         self.entropy_coef = entropy_coef
         self.use_amp = True
-        self.tensor_dtype = torch.float16 if self.use_amp else torch.float32
         self.symlog_twohot_loss = SymLogTwoHotLoss(255, -20, 20)
 
         # Sequential actor model to map from feat_dim to action_dim

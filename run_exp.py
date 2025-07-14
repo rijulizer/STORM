@@ -85,15 +85,15 @@ class RunParams:
 
 def main():
     env_names = [
-        # "ALE/MsPacman-v5",
         "MiniGrid-Empty-8x8-v0",
         # "MiniGrid-SimpleCrossingS9N1-v0",
         # "MiniGrid-FourRooms-v0",
         # "MiniGrid-MemoryS11-v0",
-        ## "MiniGrid-RedBlueDoors-6x6-v0",
-        # "MiniGrid-Empty-Random-6x6-v0",
+        ## "ALE/MsPacman-v5",
+        ## "MiniGrid-Empty-Random-6x6-v0",
+        ## "MiniGrid-Empty-5x5-v0",
     ]
-    run_params = RunParams(env_names, exp_name="Empty-FullObs-TEM-v2")
+    run_params = RunParams(env_names, exp_name="Empty-FullObs-HRL-v1")
     # set seed
     seed_np_torch(seed=run_params.seed)
     # copy config file
