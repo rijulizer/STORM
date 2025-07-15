@@ -207,6 +207,7 @@ def joint_train_world_model_agent(
     imagine_context_length,
     imagine_batch_length,
     save_every_steps,
+    log_video_steps,
     seed,
     logger,
     args,
@@ -327,7 +328,12 @@ def joint_train_world_model_agent(
             and total_steps * num_envs >= 0
         ):
             # print("Training Agent...")
-            if total_steps % save_every_steps == 0:
+            if total_steps % log_video_steps == 0:
+                print(
+                    colorama.Fore.YELLOW
+                    + f"Logging videos at step: {total_steps}"
+                    + colorama.Style.RESET_ALL
+                )
                 log_video = True
             else:
                 log_video = False
@@ -353,7 +359,7 @@ def joint_train_world_model_agent(
             for key, value in metrics.items():
                 logger.log(key, value, step=total_steps)
         # save model per episode
-        if total_steps % (save_every_steps // num_envs) == 0:
+        if replay_buffer.ready and total_steps % save_every_steps == 0:
             print(
                 colorama.Fore.GREEN
                 + f"Saving model at total steps {total_steps}"
