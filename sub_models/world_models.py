@@ -473,6 +473,7 @@ class WorldModel(nn.Module):
 
         self.init_imagine_buffer(B, L, dtype=self.tensor_dtype)
         obs_hat_list = []
+        goals_log = []
 
         self.storm_transformer.reset_kv_cache_list(B, dtype=self.tensor_dtype)
         # context
@@ -543,6 +544,15 @@ class WorldModel(nn.Module):
                     .cpu()
                     .numpy()
                 )
+                goal_log = self.goal_buffer[:: B // 4]
+                # convert goal to env frames
+                goal_log_frames = self.image_decoder(goal_log.to(torch.float32))
+                goal_log_frames = (
+                    torch.clamp(goal_log_frames * 255.0, 0, 255)
+                    .to(torch.uint8)
+                    .cpu()
+                    .numpy()
+                )
                 # taken_actions = (
                 #     self.action_buffer[:: B // 4, :L].to(torch.uint8).cpu().numpy()
                 # )
@@ -556,12 +566,18 @@ class WorldModel(nn.Module):
 
                 logger.run.log(
                     {
-                        "Imagine/predict_video": wandb.Video(
+                        "Vid_logs/imagination": wandb.Video(
                             obs_frames, fps=4, format="mp4"
-                        )
+                        ),
+                        "Vid_logs/manager_goal": wandb.Video(
+                            goal_log_frames, fps=4, format="mp4"
+                        ),
                     }
                 )
             except Exception as e:
+                print(
+                    f"DEBUG: obs_frames shape: {obs_frames.shape}, goal_log_frames shape: {goal_log_frames.shape}"
+                )
                 pass
         # ensure the last token is removed to make the length of the buffer same
         # [B, L+1, C] -> [B, L, C]
