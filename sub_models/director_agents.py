@@ -72,7 +72,7 @@ class BaseAgent(nn.Module):
 
         self.critic_op_dim = 255  # TODO: Check this # 255 in STORM
         self.hidden_dim = 512  # config
-        self.num_layers = 4  # config
+        self.num_layers = 3  # 4  # config
         self.gamma = 0.985
         self.clip_value = 100.0  # Gradient clipping value
         self.discount = 0.99  # config
@@ -240,7 +240,7 @@ class BaseAgent(nn.Module):
 
                 # Generate critic reward function specific reward
                 # reward functions operate on Deter in Director ~ Sample in STORM
-                reward = traj[critic["reward"]]  # TODO: Check input sample
+                reward = traj[critic["reward"]]
                 lambda_return = calc_lambda_return(
                     reward, value, termination, self.gamma, self.lambd
                 )
@@ -323,7 +323,7 @@ class GoalEncoder(nn.Module):
             self._op_dim_flatten = op_dim[0] * op_dim[1]
         else:
             self._op_dim_flatten = op_dim
-        self._layers = 4  # config
+        self._layers = 3  # 4  # config
         self._units = 512  # config
         # self._inputs = inputs
         # self._dims = dims
@@ -382,7 +382,7 @@ class GoalDecoder(nn.Module):
         else:
             self._input_dim = input_dim
         self._op_dim = op_dim
-        self._layers = 4  # config
+        self._layers = 3  # 4 # config
         self._units = 512  # config
         # self._inputs = inputs
         # self._dims = dims
@@ -603,7 +603,6 @@ class DirectorAgent(nn.Module):
 
         # Finally generate primitive action distribution
         action_dist = self.worker.policy(worker_input)
-        # TODO: Have mechnanism to save the goal for visualization
         # Update the carry state everytime the policy step is called
         self.carry["step"] += 1
 
@@ -658,7 +657,9 @@ class DirectorAgent(nn.Module):
             decoded_dist = self.goal_decoder(skill_sample)  # p(x|z)
             # Reconstruction loss (negative log-likelihood)
             # [B, L] -> [B]
-            recon_loss = -decoded_dist.log_prob(wm_sample.detach()).mean(-1)
+            recon_loss = decoded_dist.log_prob(wm_sample.detach()).mean(
+                -1
+            )  # FIXME: Negative removed as the MSEDist just returns the MSE()
             # KL divergence
             # [B, L] -> [B]
             kl_loss = torch.distributions.kl_divergence(
@@ -683,7 +684,7 @@ class DirectorAgent(nn.Module):
             # --- Metrics ---
             metrics["Agent/goal_recon_loss"] = recon_loss.mean().item()
             metrics["Agent/goal_kl_loss"] = kl_loss.mean().item()
-            metrics["Agent/goal_VAE_loss"] = vae_loss.item()
+            metrics["Agent/goal_total_loss"] = vae_loss.item()
 
         return metrics
 
@@ -817,6 +818,6 @@ class DirectorAgent(nn.Module):
         metrics.update(mw_metrics)
 
         # --- Success tracking ---
-        metrics["Director/success_manager"] = success(traj["reward_goal"]).item()
+        metrics["Agent/success_manager"] = success(traj["reward_goal"]).item()
 
         return metrics
