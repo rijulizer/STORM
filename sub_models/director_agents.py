@@ -7,7 +7,12 @@ from torch.cuda.amp import autocast
 from torchrl.data import AdaptiveKLController
 
 from sub_models.functions_losses import SymLogTwoHotLoss
-from sub_models.torch_utils import MSEDist, OneHotDist
+from sub_models.torch_utils import (
+    MSEDist,
+    OneHotDist,
+    MultiOneHotCategorical,
+    multi_onehot_kl,
+)
 from utils import EMAScalar
 
 from sub_models.constants import DEVICE, DTYPE_16
@@ -212,6 +217,7 @@ class BaseAgent(nn.Module):
             action = traj["action"]
             # cont = imagine_rollout["cont"]
             termination = traj["termination"]
+            weights = traj["weight"].detach()  # [B, L] # weights for the trajectory
             goal = traj.get("goal", None)
             if goal is not None:
                 # for the case of worker the goal is also part of latent
@@ -255,18 +261,15 @@ class BaseAgent(nn.Module):
                 slow_value_regularization_loss = self.symlog_twohot_loss(
                     raw_value, slow_lambda_return.detach()
                 )  # [:, :-1]
-                # Apply the critic scale as a multiplicative factor
-                # #TODO: for now the scales are used to scale lossess
-                scaled_value_loss = critic["scale"] * value_loss
-                scaled_slow_value_regularization_loss = (
-                    critic["scale"] * slow_value_regularization_loss
-                )
+
                 # update the critic losses
-                total_value_loss += scaled_value_loss
-                total_slow_value_loss += scaled_slow_value_regularization_loss
-                total_critic_loss += (
-                    scaled_value_loss + scaled_slow_value_regularization_loss
+                total_value_loss += value_loss * critic["scale"]
+                total_slow_value_loss += (
+                    slow_value_regularization_loss * critic["scale"]
                 )
+                total_critic_loss += (
+                    value_loss + slow_value_regularization_loss
+                ) * critic["scale"]
 
                 lower_bound = self.lowerbound_ema(percentile(lambda_return, 0.05))
                 upper_bound = self.upperbound_ema(percentile(lambda_return, 0.95))
@@ -284,7 +287,9 @@ class BaseAgent(nn.Module):
             if len(log_prob.shape) == 3:
                 # for manager the log_prob is [B, L, K]
                 avg_norm_advantage = avg_norm_advantage.unsqueeze(-1)  # [B,L,1]
-            policy_loss = -(log_prob * avg_norm_advantage.detach()).mean()
+            policy_loss = -(
+                log_prob * avg_norm_advantage.detach()
+            ).mean()  # [B, L]->scalar
             entropy_loss = action_dist.entropy().mean()
 
             # Calculate total loss
@@ -369,7 +374,9 @@ class GoalEncoder(nn.Module):
         probs = F.softmax(x, dim=-1)
         uniform = torch.ones_like(probs) / probs.shape[-1]
         probs = (1 - self._unimix) * probs + self._unimix * uniform
-        dist = torch.distributions.OneHotCategorical(probs=probs)
+        # [B, L, K, K] -> [B, L, K, K]
+        # dist = torch.distributions.OneHotCategorical(probs=probs) #FIXME
+        dist = MultiOneHotCategorical(probs=probs)  # Wrap in MultiOneHotCategorical
         return dist
 
 
@@ -441,7 +448,7 @@ class DirectorAgent(nn.Module):
         self.manager = BaseAgent(
             [  # Manager gets only external WM reward and exploration reward
                 {"critic": "extr", "scale": 1.0, "reward": "reward_extr"},
-                {"critic": "expl", "scale": 0.1, "reward": "reward_expl"},
+                {"critic": "expl", "scale": 0.3, "reward": "reward_expl"},
             ],
             input_dim=self.wm_feat_dim,
             action_dim=self.skill_shape,
@@ -483,14 +490,8 @@ class DirectorAgent(nn.Module):
         """
         # Create logits = 0 → uniform categorical
         logits = torch.zeros(self.skill_shape, device=DEVICE)
-        dist = torch.distributions.OneHotCategorical(logits=logits)
-        # Wrap in Independent if shape > 1
-        # TODO: Find alternative for Independent in torch distributions
-        # as this distribution is not supported for KL divergence
-        # if len(self.skill_shape) > 1:
-        #     dist = torch.distributions.Independent(
-        #         dist, reinterpreted_batch_ndims=len(self.skill_shape) - 1
-        #     )
+        # dist = torch.distributions.OneHotCategorical(logits=logits) #FIXME
+        dist = MultiOneHotCategorical(logits=logits)
         return dist
 
     def initiate_carry(
@@ -661,10 +662,8 @@ class DirectorAgent(nn.Module):
                 -1
             )  # FIXME: Negative removed as the MSEDist just returns the MSE()
             # KL divergence
-            # [B, L] -> [B]
-            kl_loss = torch.distributions.kl_divergence(
-                encoded_dist, self.skill_prior
-            ).mean((-2, -1))
+            # ([B, L, K, K], [K, K]) -> [B, L] -> [B]
+            kl_loss = multi_onehot_kl(encoded_dist, self.skill_prior).sum(-1)
             kl_coef = self.kl_controller.update(kl_loss.detach().cpu())
 
             vae_loss = (recon_loss + kl_coef * kl_loss).mean()  # [B] -> scalar

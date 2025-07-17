@@ -1,6 +1,7 @@
 import torch
 from sub_models.constants import DEVICE, DTYPE_16
 from sub_models.director_agents import GoalEncoder, GoalDecoder, DirectorAgent
+from sub_models.torch_utils import multi_onehot_kl
 
 # Write some sample example cases for GoalEncoder and GoalDecoder
 # Write some sample example cases for GoalEncoder and GoalDecoder
@@ -48,7 +49,7 @@ print("\n------- Test Goal VAE Training-------")
 ## Define the DirectorAgent
 agent = DirectorAgent(wm_hidden_dim, wm_sample_dim, wm_action_dim).to(DEVICE)
 
-# ## Test tarin-goal-vae step
+## Test tarin-goal-vae step
 # Move all tensors in imagine_rollout to DEVICE
 imagine_rollout_on_device = {
     k: v.to(DEVICE) if torch.is_tensor(v) else v for k, v in imagine_rollout.items()
@@ -57,52 +58,67 @@ metrics = agent.train_goal_vae_step(imagine_rollout_on_device)
 print(f"\nMetrics after training: {metrics}")
 
 
-## Test GOAL-VAE
-# print("\n\nTest GOAL-VAE-->")
-# metrics = agent.train_goal_vae_step(imagine_rollout)
-# print(f"Metrics after training: {metrics}")
-## Breakdown of the goal-vae
-# metrics = {}
-# agent.goal_encoder.train()
-# agent.goal_decoder.train()
+print("\n------- Test Goal VAE Training Broken Down-------")
 
-# wm_sample = imagine_rollout["sample"]  # [B, L, Z]
+# Send each tensor to the device
+for k, v in imagine_rollout.items():
+    if isinstance(v, torch.Tensor):
+        # Check if the tensor is already on the device
+        if v.device != DEVICE:
+            # Move the tensor to the specified device
+            imagine_rollout[k] = v.to(DEVICE)
 
-# # --- Forward pass ---
-# # Get encoded distribution
-# encoded_dist = agent.goal_encoder(wm_sample)  # q(z|x)
-# skill_sample = encoded_dist.sample()
-# # Get decoded distribution
-# decoded_dist = agent.goal_decoder(skill_sample)  # p(x|z)
-# # Reconstruction loss (negative log-likelihood)
-# # [B, L] -> [B]
-# recon_loss = -decoded_dist.log_prob(wm_sample.detach()).mean(-1)
-# # KL divergence
-# # [B, L] -> [B]
-# kl_loss = torch.distributions.kl_divergence(
-#     encoded_dist, agent.skill_prior
-# ).mean((-2, -1))
-# kl_coef = agent.kl_controller.update(kl_loss.detach().cpu())
 
-# vae_loss = (recon_loss + kl_coef * kl_loss).mean()  # [B] -> scalar
+def test_train_goal_vae_step():
+    ## Test GOAL-VAE
+    metrics = {}
+    agent.goal_encoder.train()
+    agent.goal_decoder.train()
+    with torch.autocast(device_type=DEVICE.type, dtype=DTYPE_16, enabled=agent.use_amp):
+        # Breakdown of the goal-vae
+        metrics = {}
+        agent.goal_encoder.train()
+        agent.goal_decoder.train()
 
-# # --- Backward pass for VAE only ---
-# self.optimizer.zero_grad(set_to_none=True)
-# if self.scaler is not None:
-#     self.scaler.scale(vae_loss).backward()
-#     self.scaler.unscale_(self.optimizer)
-#     torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1000.0)
-#     self.scaler.step(self.optimizer)
-#     self.scaler.update()
-# else:
-#     vae_loss.backward()
-#     torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1000.0)
-#     self.optimizer.step()
-# # --- Metrics ---
-# metrics["Director/goal_recon_loss"] = recon_loss.mean().item()
-# metrics["Director/goal_kl_loss"] = kl_loss.mean().item()
-# metrics["Director/goal_VAE_loss"] = vae_loss.item()
-# print(f"\n\nskill_sample device: {skill_sample.device}")
-# print(f"recon_loss device: {recon_loss.device}")
-# print(f"kl_loss device: {kl_loss.device, kl_loss.detach().device}")
-# print(f"VAE_loss device: {vae_loss.device}")
+        wm_sample = imagine_rollout["sample"]  # [B, L, Z]
+
+        # --- Forward pass ---
+        # Get encoded distribution
+        encoded_dist = agent.goal_encoder(wm_sample)  # q(z|x)
+        skill_sample = encoded_dist.sample()  # [B, L ,8, 8]
+        # Get decoded distribution
+        decoded_dist = agent.goal_decoder(skill_sample)  # p(x|z)
+        # Reconstruction loss (negative log-likelihood)
+        # [B, L] -> [B]
+        recon_loss = -decoded_dist.log_prob(wm_sample.detach()).mean(-1)
+        # KL divergence
+        # [B, L] -> [B]
+        # kl_loss = torch.distributions.kl_divergence(encoded_dist, agent.skill_prior).mean(
+        #     (-2, -1)
+        # )
+        kl_loss = multi_onehot_kl(encoded_dist, agent.skill_prior).sum(-1)
+        print(f"kl_loss: {kl_loss.shape}, recon_loss: {recon_loss.shape}")
+        kl_coef = agent.kl_controller.update(kl_loss.detach().cpu())
+
+        vae_loss = (recon_loss + kl_coef * kl_loss).mean()  # [B] -> scalar
+
+        # --- Backward pass for VAE only ---
+        # self.optimizer.zero_grad(set_to_none=True)
+        # if self.scaler is not None:
+        #     self.scaler.scale(vae_loss).backward()
+        #     self.scaler.unscale_(self.optimizer)
+        #     torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1000.0)
+        #     self.scaler.step(self.optimizer)
+        #     self.scaler.update()
+        # else:
+        #     vae_loss.backward()
+        #     torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1000.0)
+        #     self.optimizer.step()
+        # --- Metrics ---
+        metrics["Director/goal_recon_loss"] = recon_loss.mean().item()
+        metrics["Director/goal_kl_loss"] = kl_loss.mean().item()
+        metrics["Director/goal_VAE_loss"] = vae_loss.item()
+        print(metrics)
+
+
+# test_train_goal_vae_step()
