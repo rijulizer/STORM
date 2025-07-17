@@ -287,9 +287,10 @@ class BaseAgent(nn.Module):
             if len(log_prob.shape) == 3:
                 # for manager the log_prob is [B, L, K]
                 avg_norm_advantage = avg_norm_advantage.unsqueeze(-1)  # [B,L,1]
+                weights = weights.unsqueeze(-1)  # [B, L, 1]
             policy_loss = -(
-                log_prob * avg_norm_advantage.detach()
-            ).mean()  # [B, L]->scalar
+                log_prob * avg_norm_advantage.detach() * weights
+            ).sum()  # [B, L]->scalar
             entropy_loss = action_dist.entropy().mean()
 
             # Calculate total loss
