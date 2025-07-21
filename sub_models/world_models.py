@@ -428,10 +428,6 @@ class WorldModel(nn.Module):
         This can slightly improve the efficiency of imagine_data
         But may vary across different machines
         """
-        # if (
-        #     self.imagine_batch_size != imagine_batch_size
-        #     or self.imagine_batch_length != imagine_batch_length
-        # ): # probably not needed
         # print(
         #     f"init_imagine_buffer: {imagine_batch_size}x{imagine_batch_length}@{dtype}"
         # )
@@ -442,21 +438,20 @@ class WorldModel(nn.Module):
         sample_size = (self.B, self.L + 1, self.stoch_flattened_dim)
         hidden_size = (self.B, self.L + 1, self.transformer_hidden_dim)
         scalar_size = (self.B, self.L)
-        goal_size = (self.B, self.L, self.stoch_flattened_dim)
-        skill_size = (self.B, self.L, 8, 8)  # FIXME: makeit a variable
+        goal_size = (self.B, self.L + 1, self.stoch_flattened_dim)
+        skill_size = (self.B, self.L + 1, 8, 8)  # FIXME: makeit a variable
 
         # Initiate buffers with zeros
         self.sample_buffer = torch.zeros(sample_size, dtype=dtype, device=DEVICE)
         self.hidden_buffer = torch.zeros(hidden_size, dtype=dtype, device=DEVICE)
         self.action_buffer = torch.zeros(scalar_size, dtype=dtype, device=DEVICE)
-        self.reward_hat_buffer = torch.zeros(
-            scalar_size, dtype=dtype, device=DEVICE.type
-        )
+        self.reward_hat_buffer = torch.zeros(scalar_size, dtype=dtype, device=DEVICE)
         self.termination_hat_buffer = torch.zeros(
-            scalar_size, dtype=dtype, device=DEVICE.type
+            scalar_size, dtype=dtype, device=DEVICE
         )
-        self.goal_buffer = torch.zeros(goal_size, dtype=dtype, device=DEVICE.type)
-        self.skill_buffer = torch.zeros(skill_size, dtype=dtype, device=DEVICE.type)
+        self.goal_buffer = torch.zeros(goal_size, dtype=dtype, device=DEVICE)
+        self.skill_buffer = torch.zeros(skill_size, dtype=dtype, device=DEVICE)
+        self.agent_carry_step = 0
 
     def imagine_data(
         self,
@@ -470,16 +465,15 @@ class WorldModel(nn.Module):
         B = imagine_batch_size
         L = imagine_batch_length
         imagine_rollout = {}
-
+        # Initialize the buffers. This also refreshes buffer goals and skills.
         self.init_imagine_buffer(B, L, dtype=self.tensor_dtype)
         obs_hat_list = []
-        goals_log = []
 
         self.storm_transformer.reset_kv_cache_list(B, dtype=self.tensor_dtype)
-        # context
         context_latent = self.encode_obs(buffer_sample["obs"])
-        # initiate the buffer with the first sample
-        for i in range(buffer_sample["obs"].shape[1]):
+        sample_len = buffer_sample["obs"].shape[1]
+        # Run replay buffer transitions to get the last token
+        for i in range(sample_len):
             (
                 last_obs_hat,
                 last_reward_hat,
@@ -493,29 +487,35 @@ class WorldModel(nn.Module):
             )
         self.sample_buffer[:, 0:1] = last_flattened_sample
         self.hidden_buffer[:, 0:1] = last_dist_feat
-        if agent.__class__.__name__ == "DirectorAgent":
-            # Agent needs to refresh carry in the loop L
-            # Goal and skill from a differenet batch wont make sense
-            agent.initiate_carry()
+
         # Imagine, incrementaly get the next tokens
-        for i in range(L):  # len (imagination)/ context_length 16
+        for i in range(L):
             latent = torch.cat(
                 [
                     self.sample_buffer[:, i : i + 1],
                     self.hidden_buffer[:, i : i + 1],
                 ],
-                dim=-1,  # [B, 1, Z+Z]
+                dim=-1,  # [B, 1, Z+D]
             )
-            action = agent.sample(latent)  # , exist_goal, exist_skill)
+            if isinstance(agent, DirectorAgent):
+                agent_img_carry = {
+                    "goal": self.goal_buffer[:, i : i + 1],  # [B, 1, z]
+                    "skill": self.skill_buffer[:, i : i + 1],  # [B, 1, K, K]
+                    "step": self.agent_carry_step,
+                }
+                # get action and updated carry from the agent
+                action, agent_img_carry_updt = agent.sample_imagiantion(
+                    latent, agent_img_carry
+                )
+                self.goal_buffer[:, i + 1 : i + 2] = agent_img_carry_updt["goal"]
+                self.skill_buffer[:, i + 1 : i + 2] = agent_img_carry_updt["skill"]
+                self.agent_carry_step = agent_img_carry_updt["step"]
+            else:
+                # get action from the agent
+                action = agent.sample(latent)
+
             # Add action, goal skill to the buffer
             self.action_buffer[:, i : i + 1] = action
-            if agent.__class__.__name__ == "DirectorAgent":
-                self.goal_buffer[:, i : i + 1] = agent.carry["goal"]
-                self.skill_buffer[:, i : i + 1] = agent.carry["skill"]
-            else:
-                self.goal_buffer = None
-                self.skill_buffer = None
-
             (
                 last_obs_hat,
                 last_reward_hat,
@@ -583,6 +583,8 @@ class WorldModel(nn.Module):
         # [B, L+1, C] -> [B, L, C]
         # self.sample_buffer = self.sample_buffer[:, 0:L]  #TODO: Needed for DirectorAgent
         # self.hidden_buffer = self.hidden_buffer[:, 0:L]  #TODO: Needed for DirectorAgent
+        self.skill_buffer = self.skill_buffer[:, 1 : L + 1]  # [B, L, K, K]
+        self.goal_buffer = self.goal_buffer[:, 1 : L + 1]  # [B, L, Z]
         # return imagine_rollout
         imagine_rollout = {
             "sample": self.sample_buffer,
