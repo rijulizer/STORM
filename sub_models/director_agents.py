@@ -121,7 +121,7 @@ class BaseAgent(nn.Module):
             )
 
         # Create three models with shared backbone but different additional layers
-        for idx in range(len(self.critics)):
+        for name, critic in self.critics.items():
             critic_head = nn.Sequential(
                 *critic_model_backbone,
                 nn.Linear(self.hidden_dim, self.critic_op_dim, bias=True),
@@ -131,8 +131,8 @@ class BaseAgent(nn.Module):
             # Make a copy of critic for slow critic
             # To.Device is needed because the models are not modellist or model dict
             # So automatically wont moved to the device
-            self.critics[idx]["model"] = critic_head.to(DEVICE)
-            self.critics[idx]["slow_model"] = deepcopy(critic_head).to(DEVICE)
+            critic["model"] = critic_head.to(DEVICE)
+            critic["slow_model"] = deepcopy(critic_head).to(DEVICE)
 
         self.lowerbound_ema = EMAScalar(decay=0.99)
         self.upperbound_ema = EMAScalar(decay=0.99)
@@ -150,7 +150,7 @@ class BaseAgent(nn.Module):
         """
         Update slow critic models parameters with decay.
         """
-        for critic in self.critics:
+        for name, critic in self.critics.items():
             slow_model = critic["slow_model"]
             model = critic["model"]
             for slow_param, param in zip(slow_model.parameters(), model.parameters()):
@@ -177,6 +177,8 @@ class BaseAgent(nn.Module):
             dist = MSEDist(logits=logits, dims=1)
         elif self.actor_dist == "Categorical":
             dist = torch.distributions.Categorical(logits=logits)
+        elif self.actor_dist == "MultiOneHotCategorical":
+            dist = MultiOneHotCategorical(logits=logits)
         else:
             raise ValueError(f"Unknown actor distribution: {self.actor_dist}")
         return dist
@@ -231,15 +233,43 @@ class BaseAgent(nn.Module):
             action_dist = self.policy(latent)  # [B, L, action_dim]
             # get the log prob of the actual action
             # Expects action to have values between 0 and action_dim-1
+            # if goal is None:  # for manager
+            #     # Remove negatives # Remove float noise
+            #     action = torch.round(action.clamp(0, 1))
+            #     is_not_one_hot = ~(
+            #         (action.sum(dim=-1) == 1)
+            #         & (action.max(dim=-1).values == 1)
+            #         & (action.min(dim=-1).values >= 0)
+            #     )
+            #     invalid_idx = torch.nonzero(is_not_one_hot).detach().cpu().numpy()
+            #     print("❌ Invalid one-hot entries at:", invalid_idx)
+            #     print("invalid example:", action[invalid_idx[0]])
+            #     print(
+            #         f"DEBUG: action: {action.shape}, action_dist: {action_dist.sample().shape}"
+            #     )
+            #     print(
+            #         f"DEBUG: Non-one-hot row detected: {torch.all((action.sum(dim=-1) == 1))}"
+            #     )
+            #     print(
+            #         f"DEBUG: Row has no 1: {torch.all((action.max(dim=-1).values == 1))}"
+            #     )
+            #     print(
+            #         f"DEBUG: Row has < 0 values {torch.all((action.min(dim=-1).values < 0))}"
+            #     )
+            #     invalid_mask = (action != 0) & (action != 1)
+            #     invalid_values = action[invalid_mask]
+
+            #     print(f"⚠️ Found {invalid_values.numel()} invalid (non-0/1) values")
+            #     print(invalid_values)
             log_prob = action_dist.log_prob(action)  # [B, L]
 
             total_critic_loss = 0.0
-            total_value_loss = 0.0
-            total_slow_value_loss = 0.0
+            # total_value_loss = 0.0
+            # total_slow_value_loss = 0.0
             norm_aqdvantages = []  # TODO: check this logic
 
             # Iterate over all critics and calculate values
-            for critic in self.critics:
+            for name, critic in self.critics.items():
                 # get value for each critic model
                 raw_value = critic["model"](latent)
                 value = self.symlog_twohot_loss.decode(raw_value)
@@ -260,13 +290,13 @@ class BaseAgent(nn.Module):
                 value_loss = self.symlog_twohot_loss(raw_value, lambda_return.detach())
                 slow_value_regularization_loss = self.symlog_twohot_loss(
                     raw_value, slow_lambda_return.detach()
-                )  # [:, :-1]
+                )
 
                 # update the critic losses
-                total_value_loss += value_loss * critic["scale"]
-                total_slow_value_loss += (
-                    slow_value_regularization_loss * critic["scale"]
-                )
+                # total_value_loss += value_loss * critic["scale"]
+                # total_slow_value_loss += (
+                #     slow_value_regularization_loss * critic["scale"]
+                # )
                 total_critic_loss += (
                     value_loss + slow_value_regularization_loss
                 ) * critic["scale"]
@@ -275,10 +305,11 @@ class BaseAgent(nn.Module):
                 upper_bound = self.upperbound_ema(percentile(lambda_return, 0.95))
                 S = upper_bound - lower_bound
                 norm_ratio = torch.max(torch.ones(1).to(DEVICE), S)
-                norm_aqdvantages.append(
-                    (lambda_return - value) / norm_ratio
-                )  # [:, :-1]
-
+                norm_aqdvantages.append((lambda_return - value) / norm_ratio)
+                metrics[f"AC/{name}_scale"] = critic["scale"]
+                metrics[f"AC/{name}_loss"] = (
+                    value_loss + slow_value_regularization_loss
+                ).item()
             # Calcuate the average normed advantage
             avg_norm_advantage = torch.mean(
                 torch.stack(norm_aqdvantages), dim=0
@@ -290,7 +321,7 @@ class BaseAgent(nn.Module):
                 weights = weights.unsqueeze(-1)  # [B, L, 1]
             policy_loss = -(
                 log_prob * avg_norm_advantage.detach() * weights
-            ).sum()  # [B, L]->scalar
+            ).mean()  # [B, L]->scalar
             entropy_loss = action_dist.entropy().mean()
 
             # Calculate total loss
@@ -446,22 +477,38 @@ class DirectorAgent(nn.Module):
         self.skill_shape = (8, 8)  # config
         self.goal_encoder = GoalEncoder(self.wm_sample_dim, self.skill_shape)
         self.goal_decoder = GoalDecoder(self.skill_shape, self.wm_sample_dim)
+        self.reward_scale_decay = True  # config
+        self.manager_reward_alpha = 0.1  # config
         self.manager = BaseAgent(
-            [  # Manager gets only external WM reward and exploration reward
-                {"critic": "extr", "scale": 1.0, "reward": "reward_extr"},
-                {"critic": "expl", "scale": 0.3, "reward": "reward_expl"},
-            ],
+            critics={
+                "critic_extr": {
+                    "reward": "reward_extr",
+                    "scale": self.manager_reward_alpha,
+                },
+                "critic_expl": {
+                    "reward": "reward_expl",
+                    "scale": (1 - self.manager_reward_alpha),
+                },
+            },
             input_dim=self.wm_feat_dim,
             action_dim=self.skill_shape,
-            actor_dist="OneHotDist",
+            actor_dist="MultiOneHotCategorical",
         )
+        self.worker_reward_alpha = 0.1  # config
         self.worker = BaseAgent(
-            critics=[
-                {"critic": "goal", "scale": 1.0, "reward": "reward_goal"},
-            ],
+            critics={
+                "critic_goal": {
+                    "reward": "reward_goal",
+                    "scale": self.manager_reward_alpha,
+                },
+                "critic_extr": {
+                    "reward": "reward_extr",
+                    "scale": (1 - self.manager_reward_alpha),
+                },
+            },
             input_dim=self.wm_feat_dim + self.wm_sample_dim,  # goal_dim = wm_sample_dim
             action_dim=wm_action_dim,
-            actor_dist="Categorical",  # TODO: check the distribution worker
+            actor_dist="Categorical",
         )
         self.skill_prior = self.get_skill_prior()
         self.discount = 0.99  # config
@@ -559,29 +606,33 @@ class DirectorAgent(nn.Module):
         return reward[:, 1:]
 
     @torch.no_grad()
-    def policy_step(self, latent):  # , goal, skill):
+    def policy_step(self, latent):
         """
         Hierarchical policy step function.
         First, decides whether to update the goal based on step count.
         Then based on the goal, get the workers action logits.
         Policy step expects one slice of time dim L=1. B dim can indicate the number of envs as well.
         Args:
-            Latent: The latent state from the world model. cat([sample, hidden]) [B, 1, 2Z]
+            Latent: The latent state from the world model. cat([sample, hidden]) [1, 1, 2Z]
         Returns:
             action_dist: A torch distribution object for actions.
         """
-        goal = self.carry["goal"]  # [B, 1, Z]
-        skill = self.carry["skill"]  # [B, 1, K, K]
+        goal = self.carry["goal"]  # [1, 1, Z]
+        skill = self.carry["skill"]  # [1, 1, K, K]
         step = self.carry["step"]
+        # print(f"DEBUG-policy_step: step: {step}; goal_shape: {goal.shape}")
         if step % self.skill_duration == 0:
+            # print(f"DEBUG: updated skills and goal step: {step}")
             # Get new skill and goal from the manager
-            # Get skill: manager actor logits from latent
+            # Skill: manager actor logits from latent
             skill = self.manager.policy(latent).sample()
             # Decode new goal from skill #TODO: Director uses latent as a context
-            goal = self.goal_decoder(skill).mode()  # shape: [B, 1, goal_dim]
-            self.carry["goal"] = goal
+            goal = self.goal_decoder(skill).mode()  # shape: [1, 1, goal_dim]
+
             self.carry["skill"] = skill
+            self.carry["goal"] = goal
         else:
+            # print(f"DEBUG: Existing skills and goal step: {step}")
             # Ensure goal's batch size matches latent's batch size
             # can heppens when fist time latent has batch but if criterion is not met
             try:
@@ -593,9 +644,9 @@ class DirectorAgent(nn.Module):
                     f"Latent shape: {latent.shape}, Goal shape: {goal.shape}, step: {step}"
                 )
                 raise e
-        # Input to the worker actor is latent and goal concat # [B, 1, 3*Z]
+        # Input to the worker actor is latent and goal concat # [1, 1, 3*Z]
         try:
-            worker_input = torch.cat([latent, goal], dim=-1)  # [B, 1, *]
+            worker_input = torch.cat([latent, goal], dim=-1)  # [1, 1, *]
         except RuntimeError as e:
             print(f"Error in concatenating latent and goal: {e}.")
             print(
@@ -637,6 +688,75 @@ class DirectorAgent(nn.Module):
         # This is required to integrate with the train loop.
         action = self.sample(latent, greedy)
         return action.detach().cpu().squeeze(-1).numpy()
+
+    @torch.no_grad()
+    def sample_imagiantion(self, latent, carry_ext):
+        """
+        Hierarchical policy step function. For WM imagination. with external carry
+        First, decides whether to update the goal based on step count.
+        Then based on the goal, get the workers action logits.
+        Policy step expects one slice of time dim L=1. B dim can indicate the number of envs as well.
+        Args:
+            Latent: The latent state from the world model. cat([sample, hidden]) [B, 1, 2Z]
+            carry_ext: External carry state from the imagination rollout.
+        Returns:
+            action_sample: sampled actions.
+            updated_carry: Updated carry state with new goal and skill.
+        """
+        updated_carry = deepcopy(carry_ext)
+        goal = carry_ext["goal"]  # [B, 1, Z]
+        skill = carry_ext["skill"]  # [B, 1, K, K]
+        step = carry_ext["step"]
+        # print(f"DEBUG-sample_img: step: {step}; goal_shape: {goal.shape}")
+        self.eval()
+        with torch.autocast(
+            device_type=DEVICE.type, dtype=DTYPE_16, enabled=self.use_amp
+        ):
+            if step % self.skill_duration == 0:
+                # print(f"DEBUG: updated skills and goal step: {step}")
+                # Get new skill and goal from the manager
+                # Skill: manager actor logits from latent
+                skill = self.manager.policy(latent).sample()
+                # Decode new goal from skill #TODO: Director uses latent as a context
+                goal = self.goal_decoder(skill).mode()  # shape: [B, 1, goal_dim]
+
+                updated_carry["skill"] = skill
+                updated_carry["goal"] = goal
+            else:
+                # print(f"DEBUG: Existing skills and goal step: {step}")
+                # Ensure goal's batch size matches latent's batch size
+                # can heppens when fist time latent has batch but if criterion is not met
+                try:
+                    if (
+                        goal.shape[0] != latent.shape[0]
+                        or goal.shape[1] != latent.shape[1]
+                    ):
+                        print(
+                            f"DEBUG: Rehsaping needed for goal {goal.shape}, latet: {latent.shape}"
+                        )
+                        goal = goal.expand(latent.shape[0], latent.shape[1], -1)
+                except RuntimeError as e:
+                    print(f"Error in concatenating latent and goal: {e}.")
+                    print(
+                        f"Latent shape: {latent.shape}, Goal shape: {goal.shape}, step: {step}"
+                    )
+                    raise e
+            # Input to the worker actor is latent and goal concat # [B, 1, 3*Z]
+            try:
+                worker_input = torch.cat([latent, goal], dim=-1)  # [B, 1, *]
+            except RuntimeError as e:
+                print(f"Error in concatenating latent and goal: {e}.")
+                print(
+                    f"Latent shape: {latent.shape}, Goal shape: {goal.shape}, step: {step}"
+                )
+                raise e
+
+            # Finally generate primitive action distribution then sample
+            action_sample = self.worker.policy(worker_input).sample()
+        # Update the carry state everytime the policy step is called
+        updated_carry["step"] += 1
+
+        return action_sample, updated_carry
 
     def train_goal_vae_step(self, imagine_rollout: dict):
         """
@@ -706,6 +826,17 @@ class DirectorAgent(nn.Module):
             # generate the manager and worker trajectories
             manager_traj = self.manager_traj(imagine_rollout)
             worker_traj = self.worker_traj(imagine_rollout)
+            if self.reward_scale_decay:
+                ##  Change the scales linearly over training period
+                self.manager.critics["critic_extr"]["scale"] = self.manager_reward_alpha
+                self.manager.critics["critic_expl"]["scale"] = (
+                    1 - self.manager_reward_alpha
+                )
+
+                self.worker.critics["critic_goal"]["scale"] = self.worker_reward_alpha
+                self.worker.critics["critic_extr"]["scale"] = (
+                    1 - self.worker_reward_alpha
+                )
             # Train the manager and worker
             mets = self.worker.update(worker_traj)
             metrics.update({f"Worker_{k}": v for k, v in mets.items()})

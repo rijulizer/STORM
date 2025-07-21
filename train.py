@@ -24,10 +24,10 @@ from sub_models.replay_buffer import ReplayBuffer
 import env_wrapper
 
 from sub_models.agents import ActorCriticAgent
-
 from sub_models.director_agents import DirectorAgent
 from sub_models.functions_losses import symexp
 from sub_models.world_models import WorldModel, MSELoss
+from utils import linear_decay
 from sub_models.constants import DEVICE
 
 
@@ -231,6 +231,8 @@ def joint_train_world_model_agent(
     context_obs = deque(maxlen=imagine_batch_length)
     context_action = deque(maxlen=imagine_batch_length)
 
+    # for linear decay; starts after warmup
+    steps = 0
     # sample and train
     for total_steps in tqdm(range(max_steps)):
         # sample part >>>
@@ -253,6 +255,9 @@ def joint_train_world_model_agent(
                             context_latent, model_context_action
                         )
                     )  # [E,n,1024], [E,n,512]
+                    # print(
+                    #     "DEBUG [Train]:------------- Agent sampling action-------------"
+                    # )
                     action = agent.sample_as_env_action(
                         torch.cat([prior_flattened_sample, last_dist_feat], dim=-1),
                         greedy=False,
@@ -327,7 +332,7 @@ def joint_train_world_model_agent(
             and total_steps % train_agent_every_steps == 0
             and total_steps * num_envs >= 0
         ):
-            # print("Training Agent...")
+            # print("DEBUG [Train]: ------------- Training Agent------------- ")
             if total_steps % log_video_steps == 0:
                 print(
                     colorama.Fore.YELLOW
@@ -350,6 +355,21 @@ def joint_train_world_model_agent(
                 logger,
             )
             # Update agent with imagined data
+            if agent.__class__.__name__ == "DirectorAgent":
+
+                agent.manager_reward_alpha = linear_decay(
+                    initial=0.01,
+                    final=0.7,
+                    step=steps,
+                    total_decay_steps=10000,  # config
+                )
+                agent.worker_reward_alpha = linear_decay(
+                    initial=0.01,
+                    final=0.9,
+                    step=steps,
+                    total_decay_steps=10000,  # config
+                )
+                steps += 1
             agent_metrics = agent.update(imagine_rollout)
             # update metrics
             metrics.update(agent_metrics)

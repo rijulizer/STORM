@@ -55,26 +55,26 @@ manager_traj = agent.manager_traj(imagine_rollout)
 worker_traj = agent.worker_traj(imagine_rollout)
 
 worker = BaseAgent(
-    critics=[
-        {"critic": "goal", "scale": 1.0, "reward": "reward_goal"},
-    ],
+    critics={
+        "critic_goal": {"reward": "reward_goal", "scale": 1.0},
+    },
     input_dim=agent.wm_feat_dim + agent.wm_sample_dim,  # goal_dim = wm_sample_dim
     action_dim=wm_action_dim,
     actor_dist="Categorical",
 ).to(DEVICE)
 
 manager = BaseAgent(
-    critics=[
-        {"critic": "extr", "scale": 1.0, "reward": "reward_extr"},
-        {"critic": "expl", "scale": 0.3, "reward": "reward_expl"},
-    ],
+    critics={
+        "critic_extr": {"reward": "reward_extr", "scale": 1.0},
+        "critic_expl": {"reward": "reward_expl", "scale": 0.3},
+    },
     input_dim=agent.wm_feat_dim,
     action_dim=agent.skill_shape,
-    actor_dist="OneHotDist",
+    actor_dist="OneHotDist",  # "MultiOneHotCategorical",
 ).to(DEVICE)
 
 
-def test_manager_base_agent():
+def test_manager_base_update():
     """
     Test the Manager base agent.
     """
@@ -124,7 +124,7 @@ def test_update_broken(agent, traj):
         norm_aqdvantages = []  # TODO: check this logic
 
         # Iterate over all critics and calculate values
-        for critic in agent.critics:
+        for name, critic in agent.critics.items():
             # get value for each critic model
             raw_value = critic["model"](latent)
             value = agent.symlog_twohot_loss.decode(raw_value)
@@ -153,7 +153,14 @@ def test_update_broken(agent, traj):
             total_critic_loss += (value_loss + slow_value_regularization_loss) * critic[
                 "scale"
             ]
-
+            print(f"\nCritic: {name}, Scale: {critic["scale"]}")
+            print(
+                f"\nscaled value_loss: {value_loss.item()* critic["scale"]} \n scaled slow_value_regularization_loss: {slow_value_regularization_loss.item()* critic["scale"]}"
+            )
+            print(
+                f"\ntotal_value_loss: {total_value_loss.item()} \ntotal_slow_value_loss: {total_slow_value_loss.item()}"
+            )
+            print(f"\ntotal_critic_loss: ", total_critic_loss.item())
             lower_bound = agent.lowerbound_ema(percentile(lambda_return, 0.05))
             upper_bound = agent.upperbound_ema(percentile(lambda_return, 0.95))
             S = upper_bound - lower_bound
@@ -213,4 +220,16 @@ if __name__ == "__main__":
     test_update_broken(worker, worker_traj)
 
     print("\n----------------Test Manager Base agent Update Broken-----------------")
+    test_update_broken(manager, manager_traj)
+
+    ## modify manager/wroker reward scales
+    print(
+        "\n----------------Test Manager Base agent Update Broken with modified scales-----------------"
+    )
+    worker.critics["critic_goal"]["scale"] = 100
+    manager.critics["critic_extr"]["scale"] = 100
+    manager.critics["critic_expl"]["scale"] = 0.001
+    print(f"\t-----worker--------")
+    test_update_broken(worker, worker_traj)
+    print(f"\t-----manager--------")
     test_update_broken(manager, manager_traj)
