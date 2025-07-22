@@ -128,7 +128,7 @@ def test_update_broken(agent, traj):
             # get value for each critic model
             raw_value = critic["model"](latent)
             value = agent.symlog_twohot_loss.decode(raw_value)
-
+            print("DEBUG: value shape", value.shape)
             # Generate critic reward function specific reward
             # reward functions operate on Deter in Director ~ Sample in STORM
             reward = traj[critic["reward"]]

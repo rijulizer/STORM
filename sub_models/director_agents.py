@@ -43,7 +43,6 @@ def calc_lambda_return(rewards, values, termination, gamma, lam, dtype=torch.flo
         gamma_return[:, t] = rewards[:, t] + gamma * continuation[:, t] * (
             (1 - lam) * values[:, t] + lam * gamma_return[:, t + 1]
         )
-    # TODO: #[:, :-1] not needed as the sample and hidden extra element is already removed
     return gamma_return[:, :-1]
 
 
@@ -227,10 +226,7 @@ class BaseAgent(nn.Module):
             else:
                 latent = torch.cat((sample, hidden), dim=-1)  # [B, L, 2*]
             # Get action logits using actor model
-            # action_logits = self.actor(latent)
-            # # [B, L, action_dim]
-            # action_dist = distributions.Categorical(logits=action_logits)
-            action_dist = self.policy(latent)  # [B, L, action_dim]
+            action_dist = self.policy(latent[:, :-1])  # [B, L, action_dim]
             # get the log prob of the actual action
             # Expects action to have values between 0 and action_dim-1
             # if goal is None:  # for manager
@@ -287,16 +283,12 @@ class BaseAgent(nn.Module):
                 )
 
                 # update value function with slow critic regularization
-                value_loss = self.symlog_twohot_loss(raw_value, lambda_return.detach())
-                slow_value_regularization_loss = self.symlog_twohot_loss(
-                    raw_value, slow_lambda_return.detach()
+                value_loss = self.symlog_twohot_loss(
+                    raw_value[:, :-1], lambda_return.detach()
                 )
-
-                # update the critic losses
-                # total_value_loss += value_loss * critic["scale"]
-                # total_slow_value_loss += (
-                #     slow_value_regularization_loss * critic["scale"]
-                # )
+                slow_value_regularization_loss = self.symlog_twohot_loss(
+                    raw_value[:, :-1], slow_lambda_return.detach()
+                )
                 total_critic_loss += (
                     value_loss + slow_value_regularization_loss
                 ) * critic["scale"]
@@ -305,11 +297,12 @@ class BaseAgent(nn.Module):
                 upper_bound = self.upperbound_ema(percentile(lambda_return, 0.95))
                 S = upper_bound - lower_bound
                 norm_ratio = torch.max(torch.ones(1).to(DEVICE), S)
-                norm_aqdvantages.append((lambda_return - value) / norm_ratio)
+                norm_aqdvantages.append((lambda_return - value[:, :-1]) / norm_ratio)
                 metrics[f"AC/{name}_scale"] = critic["scale"]
                 metrics[f"AC/{name}_loss"] = (
                     value_loss + slow_value_regularization_loss
                 ).item()
+
             # Calcuate the average normed advantage
             avg_norm_advantage = torch.mean(
                 torch.stack(norm_aqdvantages), dim=0
@@ -885,10 +878,20 @@ class DirectorAgent(nn.Module):
                 # Average rewards weighted by continuity along N dimension
                 # [B, L, *] -> [B, N, L, *] -> [B, N, *]
                 traj[key] = self.rehsape_traj(value * weights).mean(dim=2)
+
             elif key in ["cont", "termination"]:
-                # prod along the skill duration dimension. If one element is 0 then the product is 0
-                traj[key] = self.rehsape_traj(value).prod(dim=2)  # [B, L]- > [B, N]
-            else:  # [hidden, sample, action]
+                traj[key] = self.rehsape_traj(value).prod(dim=2)  # [B, L] -> [B, N]
+
+            elif key in ["hidden", "sample"]:
+                # take the first one from every K
+                traj[key] = torch.cat(
+                    (
+                        self.rehsape_traj(value[:, :-1])[:, :, 0, :],  # [B, N, Z]
+                        value[:, -1:, :],
+                    ),
+                    dim=1,
+                )
+            else:  # [action]
                 # take the first one from every K
                 traj[key] = self.rehsape_traj(value)[:, :, 0, :]  # [B, N, Z]
 
@@ -910,15 +913,32 @@ class DirectorAgent(nn.Module):
         # also pop the world model reward as its present as extr_reward
         traj.pop("reward")
         traj["cont"] = 1 - traj["termination"]
+        K = self.skill_duration
 
         for key, val in traj.items():
-            val = self.rehsape_traj(val)  # [B, N, K, *]
+            if key in ["hidden", "sample"]:  # L+1
+                # (1 2 3 4 5 6 7 8 9 10) -> ((1 2 3 4) (4 5 6 7) (7 8 9 10)) k=3
+                val = torch.cat(
+                    (
+                        self.rehsape_traj(val[:, :-1, :]),  # [B, N, K, Z]
+                        val[:, K::K].unsqueeze(2),  # added for bootstraping
+                    ),
+                    dim=2,  # [B, N, K+1, Z]
+                )
+            else:  # [rewards, goal, skill, action]
+                val = self.rehsape_traj(val)  # [B, N, K, *]
+
             # Flatten batch dimensions (N and B) into a single dimension
             val = val.reshape(
                 val.shape[0] * val.shape[1], -1, *val.shape[3:]
-            )  # [B*N, K, F]
+            )  # [B*N, ...]
             # update the trajectory with the reshaped values
             traj[key] = val
+
+        # Bootstrap sub trajectory against current not next goal.
+        traj["goal"] = torch.cat(
+            (traj["goal"], traj["goal"][:, :1, :]), dim=1
+        )  # FIXME traj["goal"][:, :-1, :]
         # Compute trajectory weights
         traj["weight"] = (
             torch.cumprod(self.discount * traj["cont"], dim=1) / self.discount

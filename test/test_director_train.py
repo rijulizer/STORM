@@ -1,3 +1,4 @@
+from copy import deepcopy
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -55,138 +56,132 @@ def test_manager_traj():
     print("Manager Trajectory Shapes->")
     for k, v in manager_trajectory.items():
         print(f"{k}: {v.shape, v.device}")
+
+
+def test_manager_traj_broken():
+    print("\n\n------------ Manager Trajectory Brekdown-----------------")
+    traj = deepcopy(imagine_rollout)
+    # for manager the action is the skill
+    traj["action"] = traj.pop("skill")  # Replace "skill" with "action"
+    # also pop the world model reward as its present as extr_reward
+    traj.pop("reward")
+    # remove the goal from the manager's trajectory; its not used in actor critics
+    traj.pop("goal")
+    traj["cont"] = 1 - traj["termination"]  # [0,0,0,1] -> [1,1,1,0] ->  # [B, L]
+    for key, value in traj.items():
+        # For the manager the reward is the mean of the rewards in the skill duration
+        if "reward" in key:  # [reward_extr, reward_expl, reward_goal]
+            # Compute weights for continuity along skill duration dimension
+            # all the elements after zero would be 0; else 1
+            weights = torch.cumprod((traj["cont"]), dim=1)  # B, L, 1
+            # Average rewards weighted by continuity along N dimension
+            # [B, L, *] -> [B, N, L, *] -> [B, N, *]
+            traj[key] = agent.rehsape_traj(value * weights).mean(dim=2)
+        elif key in ["cont", "termination"]:
+            # prod along the skill duration dimension. If one element is 0 then the product is 0
+            # traj[key] = torch.cat(
+            #     (value[:, :1], agent.rehsape_traj(value).prod(dim=2)), dim=1
+            # )  # [B, L] -> [B, 1+N]
+            traj[key] = agent.rehsape_traj(value).prod(dim=2)  # [B, L] -> [B, N]
+
+        elif key in ["hidden", "sample"]:
+            # take the first one from every K
+            traj[key] = torch.cat(
+                (
+                    agent.rehsape_traj(value[:, :-1])[:, :, 0, :],  # [B, N, Z]
+                    value[:, -1:, :],
+                ),
+                dim=1,
+            )
+        else:  # [action]
+            # take the first one from every K
+            traj[key] = agent.rehsape_traj(value)[:, :, 0, :]  # [B, N, Z]
+
+    # Compute trajectory weights
+    traj["weight"] = (
+        torch.cumprod(agent.discount * traj["cont"], dim=1) / agent.discount
+    )  # [B, N] # example: [0.9, 0.81, 0.729, 0.6561, 0] # discount=0.9
+
+    print("\n\nManager Trajectory Shapes->")
+    for key, value in traj.items():
+        print(f"{key}: {value.shape}")
     """
     Manager Trajectory Shapes->
-    hidden: torch.Size([3, 2, 32])
-    sample: torch.Size([3, 2, 32])
-    action: torch.Size([3, 2, 8, 8])
-    termination: torch.Size([3, 2])
-
-    reward_extr: torch.Size([3, 2])
-    reward_expl: torch.Size([3, 2])
-    reward_goal: torch.Size([3, 2])
-
-    cont: torch.Size([3, 2])
-    weight: torch.Size([3, 2])
-    """
-    # ## Breakdown of manager_traj
-    # traj = imagine_rollout.copy()
-    # # for manager the action is the skill
-    # traj["action"] = traj.pop("skill")  # Replace "skill" with "action"
-    # # also pop the world model reward as its present as extr_reward
-    # traj.pop("reward")
-    # traj["cont"] = 1 - traj["termination"]  # [1,1,1,0] -> [0,0,0,1] # [B, L]
-
-    # k = agent.skill_duration  # Skill duration\
-    # reshape = lambda x: x.reshape(x.shape[0], x.shape[1] // k, k, *x.shape[2:])
-    # for key, value in traj.items():
-    #     # For the manager the reward is the mean of the rewards in the skill duration
-    #     if "reward" in key:
-    #         # Case example: [reward_extr, reward_expl, reward_goal]
-    #         # Compute weights for continuity along skill duration dimension
-    #         # all the elements after zero would be 0; else 1; cumprod on kth dim
-    #         weights = torch.cumprod((traj["cont"]), dim=1)  # [B, L-1, 1]
-    #         # Average rewards weighted by continuity along N dimension
-    #         # [B, L, *] -> [B, N, L, *] -> [B, N, *]
-    #         traj[key] = reshape(value * weights).mean(dim=2)
-    #     elif key in ["cont", "termination"]:
-    #         # cont has the shape [B, L]
-    #         # [B,1] + [B, N-1]
-    #         # prod along the skill duration dimension
-    #         # concat along the N dimension, If one element is 0 then the product is 0
-    #         traj[key] = torch.cat(
-    #             [value[:, 0].unsqueeze(1), reshape(value).prod(dim=2)], dim=1
-    #         )  # ->[B, N+1]
-    #     else:
-    #         #     # Last value for the last sub-trajectory
-    #         #     last_value = value[:, -1, :]  # [B, 1, Z]
-    #         #     first_values = value[:, :-1, :]  # First value for the first sub-trajectory
-    #         #     first_values = reshape(first_values)[:, :, 0, :]  # [B, N, Z]
-    #         #     traj[key] = torch.cat([first_values, last_value], dim=1)  # [B, N+1, Z]
-    #         traj[key] = reshape(value)[:, :, 0, :]  # take the first value
-    # traj["weight"] = torch.cumprod(agent.discount * traj["cont"], dim=1) / agent.discount
-
-    # print("\n\nManager Trajectory Shapes->")
-    # for key, value in traj.items():
-    #     print(f"{key}: {value.shape}")
+    hidden: torch.Size([13, 3, 32])
+    sample: torch.Size([13, 3, 32])
+    action: torch.Size([13, 2, 8, 8])
+    termination: torch.Size([13, 2])
+    reward_extr: torch.Size([13, 2])
+    reward_expl: torch.Size([13, 2])
+    reward_goal: torch.Size([13, 2])
+    cont: torch.Size([13, 2])
+    weight: torch.Size([13, 2]) 
+"""
 
 
 def test_worker_traj():
-
     ## Test worker trajectory
     print("\n\n------------ Worker Trajectory -----------------")
     worker_trajerctory = agent.worker_traj(imagine_rollout)
     print("Worker Trajectory Shapes->")
     for k, v in worker_trajerctory.items():
         print(f"{k}: {v.shape}, {v.device}")
+
+
+def test_worker_traj_broken():
+    print("\n\n------------ Worker Trajectory Brekdown-----------------")
+    traj = deepcopy(imagine_rollout)
+    # also pop the world model reward as its present as extr_reward
+    traj.pop("reward")
+    traj["cont"] = 1 - traj["termination"]
+    K = agent.skill_duration
+
+    for key, val in traj.items():
+        if key in ["hidden", "sample"]:  # L+1
+            # (1 2 3 4 5 6 7 8 9 10) -> ((1 2 3 4) (4 5 6 7) (7 8 9 10)) k=3
+            print(
+                f"DEBUG: {agent.rehsape_traj(val[:, :-1, :]).shape},{val[:, K::K].shape}"
+            )
+            val = torch.cat(
+                (
+                    agent.rehsape_traj(val[:, :-1, :]),  # [B, N, K, Z]
+                    val[:, K::K].unsqueeze(2),  # added for bootstraping
+                ),
+                dim=2,  # [B, N, K+1, Z]
+            )
+        else:
+            val = agent.rehsape_traj(val)  # [B, N, K, *]
+
+        # Flatten batch dimensions (N and B) into a single dimension
+        val = val.reshape(
+            val.shape[0] * val.shape[1], -1, *val.shape[3:]
+        )  # [B*N, K, F]
+        # update the trajectory with the reshaped values
+        traj[key] = val
+    # Bootstrap sub trajectory against current not next goal.
+    traj["goal"] = torch.cat((traj["goal"], traj["goal"][:, :1, :]), dim=1)
+    # Compute trajectory weights
+    traj["weight"] = (
+        torch.cumprod(agent.discount * traj["cont"], dim=1) / agent.discount
+    )  # [B*N, K] # example: [0.9, 0.81, 0.729, 0.6561, 0] # discount=0.9
+
+    print("\n\nWorker Trajectory Shapes->")
+    for key, value in traj.items():
+        print(f"{key}: {value.shape}")
     """
     Worker Trajectory Shapes->
-    hidden: torch.Size([6, 8, 32])
-    sample: torch.Size([6, 8, 32])
-    action: torch.Size([6, 8])
-    termination: torch.Size([6, 8])
-    cont: torch.Size([6, 8])
-
-    goal: torch.Size([6, 8, 32])
-
-    reward_extr: torch.Size([6, 8])
-    reward_expl: torch.Size([6, 8])
-    reward_goal: torch.Size([6, 8])
-
-
-    weight: torch.Size([6, 8])
+    hidden: torch.Size([26, 9, 32])
+    sample: torch.Size([26, 9, 32])
+    action: torch.Size([26, 8])
+    termination: torch.Size([26, 8])
+    goal: torch.Size([26, 9, 32])
+    skill: torch.Size([26, 8, 8, 8])
+    reward_extr: torch.Size([26, 8])
+    reward_expl: torch.Size([26, 8])
+    reward_goal: torch.Size([26, 8])
+    cont: torch.Size([26, 8])
+    weight: torch.Size([26, 8])
     """
-    ## Breakdown
-    # traj = imagine_rollout.copy()
-    # # also pop the world model reward as its present as extr_reward
-    # traj.pop("reward")
-    # traj["cont"] = 1 - traj["termination"]
-    # k = agent.skill_duration  # Skill duration
-    # # assert (
-    # #     len(traj["action"]) % k == 1
-    # # ), "Trajectory length must be divisible by skill duration + 1."
-
-    # # Helper function to reshape tensors
-    # # [16,64] -> [2, 8, 64]; k=8
-    # reshape = lambda x: x.reshape(x.shape[0], x.shape[1] // k, k, *x.shape[2:])
-    # print("\n\nTrajectory Shapes->")
-    # for key, value in traj.items():
-    #     print(f"{key}: {value.shape}")
-    # print("\n\n")
-
-    # for key, val in traj.items():
-    #     if "reward" in key:
-    #         # Prepend a zero to align rewards with sub-trajectories
-    #         # val = torch.cat(
-    #         #     [torch.zeros_like(val[:, 0]), val], dim=1
-    #         # )  # Concat L dimension [B, L+1]
-    #         val[:, 0] = 0  # Set the first value to zero for the worker reward
-    #     # Split into overlapping sub-trajectories
-    #     # (1 2 3 4 5 6 7 8 9 10) -> ((1 2 3 4) (4 5 6 7) (7 8 9 10))
-    #     # Exclude the last element and reshape
-    #     # reshaped_val = reshape(val[:, :-1, :])  # [B, N, K, *]
-    #     reshaped_val = reshape(val)  # [B, N, K, *]
-    #     # Take every k-th element starting from k
-    #     # overlap = val[:, k::k].unsqueeze(2)  # [B, N, 1, F]
-    #     overlap = val[:, k - 1 :: k].unsqueeze(2)
-    #     val = torch.cat([reshaped_val, overlap], dim=2)  # (B, N, k+1, F)
-    #     # Flatten batch dimensions (N and B) into a single dimension
-    #     val = val.reshape(val.shape[0] * val.shape[1], -1, *val.shape[3:])  # [B*N, K+1, F]
-    #     # Remove the first sub-trajectory for rewards
-    #     if "reward" in key:
-    #         val = val[:, 1:]  # [B*N, K]
-    #     # update the trajectory with the reshaped values
-    #     traj[key] = val
-
-    # # Bootstrap sub-trajectory against the current goal, not the next
-    # traj["goal"] = torch.cat([traj["goal"][:, :-1, :], traj["goal"][:, :1, :]], dim=1)
-    # # Compute trajectory weights
-    # traj["weight"] = (
-    #     torch.cumprod(agent.discount * traj["cont"], dim=1) / agent.discount
-    # )  # [B*N, K+1] # example: [0.9, 0.81, 0.729, 0.6561, 0] # discount=0.9
-    # print("\n\nWorker Trajectory Shapes->")
-    # for key, value in traj.items():
-    #     print(f"{key}: {value.shape}")
 
 
 def test_worker():
@@ -195,7 +190,7 @@ def test_worker():
 
     # ## Train the worker
     mets = agent.worker.update(worker_traj)
-    print("\n\nWorker Metrics after training:")
+    print("Worker Metrics after training:")
     pprint(mets)
 
 
@@ -213,25 +208,19 @@ def test_worker_update():
     goal = traj.get("goal", None)
     if goal is not None:
         # for the case of worker the goal is also part of latent
-        latent = torch.cat((sample, hidden, goal), dim=-1)  # [B, L, 3*]
+        latent = torch.cat((sample, hidden, goal), dim=-1)  # [B, L+1, 3*]
     else:
-        latent = torch.cat((sample, hidden), dim=-1)  # [B, L, 2*]
+        latent = torch.cat((sample, hidden), dim=-1)  # [B, L+1, 2*]
     # Get action logits using actor model
-    # action_logits = self.actor(latent)
-    # # [B, L, action_dim]
-    # action_dist = distributions.Categorical(logits=action_logits)
-    action_dist = agent.worker.policy(latent)  # [B, L, action_dim]
+    action_dist = agent.worker.policy(latent[:, :-1])  # [B, L, action_dim]
     # get the log prob of the actual action
     # Expects action to have values between 0 and action_dim-1
     log_prob = action_dist.log_prob(action)  # [B, L]
     print(f"latent shape: {latent.shape}, \nlog_prob shape: {log_prob.shape}")
     total_critic_loss = 0.0
-    total_value_loss = 0.0
-    total_slow_value_loss = 0.0
-    norm_aqdvantages = []  # TODO: check this logic
-
+    norm_aqdvantages = []
     # Iterate over all critics and calculate values
-    for critic in agent.worker.critics:
+    for name, critic in agent.worker.critics.items():
         # get value for each critic model
         raw_value = critic["model"](latent)
         value = agent.worker.symlog_twohot_loss.decode(raw_value)
@@ -245,37 +234,38 @@ def test_worker_update():
         # get slow-value for each slow-critic-model
         slow_value = agent.worker.get_slow_value(critic["slow_model"], latent)
         slow_lambda_return = calc_lambda_return(
-            reward, slow_value, termination, agent.worker.gamma, agent.worker.lambd
+            reward,
+            slow_value,
+            termination,
+            agent.worker.gamma,
+            agent.worker.lambd,
         )
         print(
             f"value shape: {value.shape}, \nlambda_return shape: {lambda_return.shape}, \nslow_lambda_return shape: {slow_lambda_return.shape}"
         )
         # update value function with slow critic regularization
-        value_loss = agent.worker.symlog_twohot_loss(raw_value, lambda_return.detach())
-        slow_value_regularization_loss = agent.worker.symlog_twohot_loss(
-            raw_value, slow_lambda_return.detach()
-        )  # [:, :-1]
-        # Apply the critic scale as a multiplicative factor
-        # #TODO: for now the scales are used to scale lossess
-        scaled_value_loss = critic["scale"] * value_loss
-        scaled_slow_value_regularization_loss = (
-            critic["scale"] * slow_value_regularization_loss
+        value_loss = agent.worker.symlog_twohot_loss(
+            raw_value[:, :-1], lambda_return.detach()
         )
-        # update the critic losses
-        total_value_loss += scaled_value_loss
-        total_slow_value_loss += scaled_slow_value_regularization_loss
-        total_critic_loss += scaled_value_loss + scaled_slow_value_regularization_loss
+        slow_value_regularization_loss = agent.worker.symlog_twohot_loss(
+            raw_value[:, :-1], slow_lambda_return.detach()
+        )
+        total_critic_loss += (value_loss + slow_value_regularization_loss) * critic[
+            "scale"
+        ]
 
         lower_bound = agent.worker.lowerbound_ema(percentile(lambda_return, 0.05))
         upper_bound = agent.worker.upperbound_ema(percentile(lambda_return, 0.95))
         S = upper_bound - lower_bound
         norm_ratio = torch.max(torch.ones(1).to(DEVICE), S)
-        norm_aqdvantages.append((lambda_return - value) / norm_ratio)  # [:, :-1]
+        norm_aqdvantages.append((lambda_return - value[:, :-1]) / norm_ratio)
+        metrics[f"AC/{name}_scale"] = critic["scale"]
+        metrics[f"AC/{name}_loss"] = (
+            value_loss + slow_value_regularization_loss
+        ).item()
 
     # Calcuate the average normed advantage
-    avg_norm_advantage = torch.mean(
-        torch.stack(norm_aqdvantages), dim=0
-    )  # TODO: Check this logic #Dennis
+    avg_norm_advantage = torch.mean(torch.stack(norm_aqdvantages), dim=0)
     # Calculate Actor related losses
     if len(log_prob.shape) == 3:
         # for manager the log_prob is [B, L, K]
@@ -327,32 +317,27 @@ def test_manager_update():
     goal = traj.get("goal", None)
     if goal is not None:
         # for the case of worker the goal is also part of latent
-        latent = torch.cat((sample, hidden, goal), dim=-1)  # [B, L, 3*]
+        latent = torch.cat((sample, hidden, goal), dim=-1)  # [B, L+1, 3*]
     else:
-        latent = torch.cat((sample, hidden), dim=-1)  # [B, L, 2*]
+        latent = torch.cat((sample, hidden), dim=-1)  # [B, L+1, 2*]
     # Get action logits using actor model
-    # action_logits = self.actor(latent)
-    # # [B, L, action_dim]
-    # action_dist = distributions.Categorical(logits=action_logits)
-    action_dist = agent.manager.policy(latent)  # [B, L, action_dim]
+    action_dist = agent.manager.policy(latent[:, :-1])  # [B, L, action_dim]
     # get the log prob of the actual action
     # Expects action to have values between 0 and action_dim-1
     log_prob = action_dist.log_prob(action)  # [B, L]
     print(f"latent shape: {latent.shape}, \nlog_prob shape: {log_prob.shape}")
     total_critic_loss = 0.0
-    total_value_loss = 0.0
-    total_slow_value_loss = 0.0
-    norm_aqdvantages = []  # TODO: check this logic
+    norm_aqdvantages = []
 
     # Iterate over all critics and calculate values
-    for critic in agent.manager.critics:
+    for name, critic in agent.manager.critics.items():
         # get value for each critic model
         raw_value = critic["model"](latent)
         value = agent.manager.symlog_twohot_loss.decode(raw_value)
 
         # Generate critic reward function specific reward
         # reward functions operate on Deter in Director ~ Sample in STORM
-        reward = traj[critic["reward"]]  # TODO: Check input sample
+        reward = traj[critic["reward"]]
         lambda_return = calc_lambda_return(
             reward, value, termination, agent.manager.gamma, agent.manager.lambd
         )
@@ -365,31 +350,28 @@ def test_manager_update():
             f"value shape: {value.shape}, \nlambda_return shape: {lambda_return.shape}, \nslow_lambda_return shape: {slow_lambda_return.shape}"
         )
         # update value function with slow critic regularization
-        value_loss = agent.manager.symlog_twohot_loss(raw_value, lambda_return.detach())
+        value_loss = agent.manager.symlog_twohot_loss(
+            raw_value[:, :-1], lambda_return.detach()
+        )
         slow_value_regularization_loss = agent.manager.symlog_twohot_loss(
-            raw_value, slow_lambda_return.detach()
+            raw_value[:, :-1], slow_lambda_return.detach()
         )
-        # Apply the critic scale as a multiplicative factor
-        # #TODO: for now the scales are used to scale lossess
-        scaled_value_loss = critic["scale"] * value_loss
-        scaled_slow_value_regularization_loss = (
-            critic["scale"] * slow_value_regularization_loss
-        )
-        # update the critic losses
-        total_value_loss += scaled_value_loss
-        total_slow_value_loss += scaled_slow_value_regularization_loss
-        total_critic_loss += scaled_value_loss + scaled_slow_value_regularization_loss
-        print(f"total_critic_loss: {total_critic_loss}")
+        total_critic_loss += (value_loss + slow_value_regularization_loss) * critic[
+            "scale"
+        ]
+
         lower_bound = agent.manager.lowerbound_ema(percentile(lambda_return, 0.05))
         upper_bound = agent.manager.upperbound_ema(percentile(lambda_return, 0.95))
         S = upper_bound - lower_bound
         norm_ratio = torch.max(torch.ones(1).to(DEVICE), S)
-        norm_aqdvantages.append((lambda_return - value) / norm_ratio)  # [:, :-1]
+        norm_aqdvantages.append((lambda_return - value[:, :-1]) / norm_ratio)
+        metrics[f"AC/{name}_scale"] = critic["scale"]
+        metrics[f"AC/{name}_loss"] = (
+            value_loss + slow_value_regularization_loss
+        ).item()
 
     # Calcuate the average normed advantage
-    avg_norm_advantage = torch.mean(
-        torch.stack(norm_aqdvantages), dim=0
-    )  # TODO: Check this logic #Dennis
+    avg_norm_advantage = torch.mean(torch.stack(norm_aqdvantages), dim=0)
     # Calculate Actor related losses
     if len(log_prob.shape) == 3:
         # for manager the log_prob is [B, L, K]
@@ -471,15 +453,19 @@ def test_manager_worker_training_breakdown():
             print(f"{k}: {v}")
 
 
-## Run test functions
-test_manager_traj()
-test_worker_traj()
+if __name__ == "__main__":
+    ## Run test functions
+    # test_manager_traj_broken()
+    test_manager_traj()
 
-test_worker_update()
-test_worker()
+    # test_worker_traj_broken()
+    test_worker_traj()
 
-test_manager_update()
-test_manager()
+    test_worker_update()
+    test_worker()
 
-test_manager_worker_training()
-test_manager_worker_training_breakdown()
+    test_manager_update()
+    # test_manager()
+
+    # test_manager_worker_training()
+    # test_manager_worker_training_breakdown()
