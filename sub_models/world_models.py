@@ -25,6 +25,8 @@ from sub_models.constants import DEVICE, DTYPE_16
 import sub_models.agents as ActorCriticAgent
 from sub_models.director_agents import DirectorAgent
 
+from utils import draw_grid_from_matrix
+
 
 class EncoderBN(nn.Module):
     def __init__(self, in_channels, stem_channels, final_feature_width) -> None:
@@ -553,17 +555,8 @@ class WorldModel(nn.Module):
                     .cpu()
                     .numpy()
                 )
-                # taken_actions = (
-                #     self.action_buffer[:: B // 4, :L].to(torch.uint8).cpu().numpy()
-                # )
-                # print(
-                #     f"DEBUG: obs_frames shape: {obs_frames.shape}, taken_actions shape: {taken_actions.shape}"
-                # )
-                # print(
-                #     f"DEBUG: obs_frames type: {type(obs_frames)}, taken_actions type: {type(taken_actions)}"
-                # )
-                # processed_video = create_obs_action_frame(obs_frames, taken_actions)
-
+                skill_log = self.skill_buffer[:: B // 4].to(torch.uint8).cpu().numpy()
+                skill_frames = draw_grid_from_matrix(skill_log, cell_size=8)
                 logger.run.log(
                     {
                         "Vid_logs/imagination": wandb.Video(
@@ -572,19 +565,19 @@ class WorldModel(nn.Module):
                         "Vid_logs/manager_goal": wandb.Video(
                             goal_log_frames, fps=4, format="mp4"
                         ),
+                        "Vid_logs/manager_skill": wandb.Video(
+                            skill_frames, fps=4, format="mp4"
+                        ),
                     }
                 )
             except Exception as e:
                 print(
-                    f"DEBUG: obs_frames shape: {obs_frames.shape}, goal_log_frames shape: {goal_log_frames.shape}"
+                    f"DEBUG: obs_frames shape: {obs_frames.shape}, goal_log_frames shape: {goal_log_frames.shape}, skill_frames shape: {skill_frames.shape}"
                 )
                 pass
-        # ensure the last token is removed to make the length of the buffer same
-        # [B, L+1, C] -> [B, L, C]
-        # self.sample_buffer = self.sample_buffer[:, 0:L]  #TODO: Needed for DirectorAgent
-        # self.hidden_buffer = self.hidden_buffer[:, 0:L]  #TODO: Needed for DirectorAgent
-        self.skill_buffer = self.skill_buffer[:, 1 : L + 1]  # [B, L, K, K]
-        self.goal_buffer = self.goal_buffer[:, 1 : L + 1]  # [B, L, Z]
+        if isinstance(agent, DirectorAgent):
+            self.skill_buffer = self.skill_buffer[:, 1 : L + 1]  # [B, L, K, K]
+            self.goal_buffer = self.goal_buffer[:, 1 : L + 1]  # [B, L, Z]
         # return imagine_rollout
         imagine_rollout = {
             "sample": self.sample_buffer,

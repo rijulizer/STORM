@@ -174,3 +174,64 @@ def log_processed_video(observations, actions):
 def linear_decay(initial, final, step, total_decay_steps):
     ratio = min(step / total_decay_steps, 1.0)
     return initial * (1 - ratio) + final * ratio
+
+
+def draw_grid_from_matrix(matrix, cell_size=8):
+    """
+    Converts a batch of [B, L, 8, 8] matrices into a NumPy array of frames.
+    Returns:
+        np.ndarray of shape (B*L, 64, 64, 3), dtype=uint8
+    """
+    B, L, H, W = matrix.shape
+    img_size = H * cell_size
+
+    batch_frames = []
+
+    for b in range(B):
+        len_frames = []
+        for l in range(L):
+            img = (
+                np.ones((img_size, img_size, 3), dtype=np.uint8) * 255
+            )  # white background
+
+            for i in range(H):
+                for j in range(W):
+                    top_left = (j * cell_size, i * cell_size)
+                    bottom_right = ((j + 1) * cell_size, (i + 1) * cell_size)
+
+                    if matrix[b, l, i, j] == 1:
+                        cv2.rectangle(
+                            img, top_left, bottom_right, (255, 0, 0), thickness=-1
+                        )  # Blue fill
+
+                    cv2.rectangle(
+                        img, top_left, bottom_right, (0, 0, 0), thickness=1
+                    )  # Grid border
+
+            # Convert from (64, 64, 3) to (3, 64, 64)
+            img = np.transpose(img, (2, 0, 1))
+
+            len_frames.append(img)
+        len_frames = np.stack(len_frames, axis=0)
+        batch_frames.append(len_frames)
+    batch_frames = np.stack(batch_frames, axis=0)
+    return batch_frames  # Shape: [B, L, 64, 64, 3]
+
+
+if __name__ == "__main__":
+    sample_matrix = np.array(
+        [
+            [1, 0, 0, 1, 0, 0, 1, 0],
+            [0, 1, 0, 0, 1, 0, 0, 1],
+            [1, 1, 0, 0, 0, 1, 1, 0],
+            [0, 0, 1, 1, 1, 0, 0, 0],
+            [1, 0, 1, 0, 1, 0, 1, 0],
+            [0, 1, 0, 1, 0, 1, 0, 1],
+            [1, 1, 1, 0, 0, 0, 1, 1],
+            [0, 0, 0, 1, 1, 1, 0, 0],
+        ],
+        dtype=np.uint8,
+    )
+    sample_matrix = np.random.choice([0, 1], size=(3, 5, 8, 8), p=[0.5, 0.5])
+    img = draw_grid_from_matrix(sample_matrix)
+    print(f"sample_matrix shape: {sample_matrix.shape}, img shape: {img.shape}")
