@@ -77,9 +77,7 @@ class BaseAgent(nn.Module):
         self.critic_op_dim = 255  # TODO: Check this # 255 in STORM
         self.hidden_dim = 512  # config
         self.num_layers = 3  # 4  # config
-        self.gamma = 0.985
-        self.clip_value = 100.0  # Gradient clipping value
-        self.discount = 0.99  # config
+        self.gamma = 0.985  # config
         self.lambd = 0.95  # config
         self.entropy_coef = 3e-4  # config TODO: Check this
         self.use_amp = True
@@ -354,11 +352,8 @@ class GoalEncoder(nn.Module):
         else:
             self._op_dim_flatten = op_dim
         self._layers = 3  # 4  # config
-        self._units = 512  # config
-        # self._inputs = inputs
-        # self._dims = dims
-        self._unimix = 0.0  # config
-        self._outscale = 0.1  # config
+        self._units = 256  # 512  # config
+        self._unimix = 0.1  # config
 
         # Build dense layers
         self.dense_layers = nn.ModuleList()
@@ -400,8 +395,7 @@ class GoalEncoder(nn.Module):
         uniform = torch.ones_like(probs) / probs.shape[-1]
         probs = (1 - self._unimix) * probs + self._unimix * uniform
         # [B, L, K, K] -> [B, L, K, K]
-        # dist = torch.distributions.OneHotCategorical(probs=probs) #FIXME
-        dist = MultiOneHotCategorical(probs=probs)  # Wrap in MultiOneHotCategorical
+        dist = MultiOneHotCategorical(probs=probs)
         return dist
 
 
@@ -415,11 +409,7 @@ class GoalDecoder(nn.Module):
             self._input_dim = input_dim
         self._op_dim = op_dim
         self._layers = 3  # 4 # config
-        self._units = 512  # config
-        # self._inputs = inputs
-        # self._dims = dims
-        self._unimix = 0.0  # config
-        self._outscale = 0.1  # config
+        self._units = 256  # 512  # config
 
         # Build dense layers
         self.dense_layers = nn.ModuleList()
@@ -448,13 +438,12 @@ class GoalDecoder(nn.Module):
         )
 
     def forward(self, x):
-        B, L, Z = x.shape[0], x.shape[1], x.shape[2]
-        # # Flatten the input for dense layers: [B, L, Z, Z] -> [B*L, Z*Z]
-        x = x.reshape(B * L, -1)
-        # Pass through dense layers
+        B, L = x.shape[0], x.shape[1]
+        x = x.reshape(B * L, -1)  # [B, L, Z, Z] -> [B*L, Z*Z]
+
         for layer in self.dense_layers:
             x = layer(x)
-        x = x.reshape(B, L, -1)  # Reshape back to match input batch dimensions
+        x = x.reshape(B, L, -1)  # [B*L, Z*Z] -> [B, L, Z*Z]
         # Apply the distribution layer
         dist = MSEDist(x, dims=1)
         return dist
@@ -504,18 +493,19 @@ class DirectorAgent(nn.Module):
             actor_dist="Categorical",
         )
         self.skill_prior = self.get_skill_prior()
-        self.discount = 0.99  # config
+        self.discount = 0.985  # config
         self.kl_controller = AdaptiveKLController(
-            init_kl_coef=0.0, target=10.0, horizon=100
+            init_kl_coef=0.01, target=1.0, horizon=1000
         )  # config
+        self.init_kl_coeff_step = 0
         self.initiate_carry()
         # director module only trains the goal encoder and decoder
         # manager and worker are trained using the base agent update function
-        vae_params = list(self.goal_encoder.parameters()) + list(
+        self.vae_params = list(self.goal_encoder.parameters()) + list(
             self.goal_decoder.parameters()
         )
         self.optimizer = torch.optim.Adam(
-            vae_params, lr=3e-5, eps=1e-5
+            self.vae_params, lr=3e-5, eps=1e-5
         )  # FIXME: check which params are optimized!
         # Enable scaler based on DEVICE type
         self.use_amp = True
@@ -544,11 +534,8 @@ class DirectorAgent(nn.Module):
         """
         self.carry = defaultdict(str)
         self.carry["step"] = 0
-        self.carry["goal"] = torch.zeros(1, 1, self.wm_sample_dim).to(
-            DEVICE
-        )  # [1, 1, Z] B=1, L=1
+        self.carry["goal"] = torch.zeros(1, 1, self.wm_sample_dim).to(DEVICE)
         self.carry["skill"] = torch.zeros(1, 1, *self.skill_shape).to(DEVICE)
-        # carry["action"] = torch.zeros(self.wm_action_dim)
 
     @torch.no_grad()
     def extr_reward(self, imagine_rollout):
@@ -616,8 +603,7 @@ class DirectorAgent(nn.Module):
         # print(f"DEBUG-policy_step: step: {step}; goal_shape: {goal.shape}")
         if step % self.skill_duration == 0:
             # print(f"DEBUG: updated skills and goal step: {step}")
-            # Get new skill and goal from the manager
-            # Skill: manager actor logits from latent
+            # Get new skill ( manager actor logits from latent) and goal
             skill = self.manager.policy(latent).sample()
             # Decode new goal from skill #TODO: Director uses latent as a context
             goal = self.goal_decoder(skill).mode()  # shape: [1, 1, goal_dim]
@@ -641,7 +627,6 @@ class DirectorAgent(nn.Module):
         try:
             worker_input = torch.cat([latent, goal], dim=-1)  # [1, 1, *]
         except RuntimeError as e:
-            print(f"Error in concatenating latent and goal: {e}.")
             print(
                 f"Latent shape: {latent.shape}, Goal shape: {goal.shape}, step: {step}"
             )
@@ -710,7 +695,6 @@ class DirectorAgent(nn.Module):
                 # Get new skill and goal from the manager
                 # Skill: manager actor logits from latent
                 skill = self.manager.policy(latent).sample()
-                # Decode new goal from skill #TODO: Director uses latent as a context
                 goal = self.goal_decoder(skill).mode()  # shape: [B, 1, goal_dim]
 
                 updated_carry["skill"] = skill
@@ -777,9 +761,14 @@ class DirectorAgent(nn.Module):
             )  # FIXME: Negative removed as the MSEDist just returns the MSE()
             # KL divergence
             # ([B, L, K, K], [K, K]) -> [B, L] -> [B]
-            kl_loss = multi_onehot_kl(encoded_dist, self.skill_prior).sum(-1)
-            kl_coef = self.kl_controller.update(kl_loss.detach().cpu())
-
+            # kl_loss = multi_onehot_kl(encoded_dist, self.skill_prior).mean(-1) #FIXME
+            kl_loss = torch.clamp(
+                multi_onehot_kl(encoded_dist, self.skill_prior), min=0.1
+            ).mean(-1)
+            # Scale KL loss
+            # kl_coef = self.kl_controller.update(kl_loss.detach().cpu())
+            kl_coef = max(1e-2, min(1.0, self.init_kl_coeff_step / 100.0))
+            self.init_kl_coeff_step += 1
             vae_loss = (recon_loss + kl_coef * kl_loss).mean()  # [B] -> scalar
 
             # --- Backward pass for VAE only ---
@@ -787,17 +776,21 @@ class DirectorAgent(nn.Module):
             if self.scaler is not None:
                 self.scaler.scale(vae_loss).backward()
                 self.scaler.unscale_(self.optimizer)
-                torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1000.0)
+                torch.nn.utils.clip_grad_norm_(self.vae_params, max_norm=100.0)
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
             else:
                 vae_loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1000.0)
+                torch.nn.utils.clip_grad_norm_(self.vae_params, max_norm=100.0)
                 self.optimizer.step()
             # --- Metrics ---
             metrics["Agent/goal_recon_loss"] = recon_loss.mean().item()
             metrics["Agent/goal_kl_loss"] = kl_loss.mean().item()
+            metrics["Agent/goal_scaled_kl_loss"] = (kl_coef * kl_loss).mean().item()
             metrics["Agent/goal_total_loss"] = vae_loss.item()
+            goal = decoded_dist.mode()
+            metrics["Agent/goal_mean"] = goal.mean().item()
+            metrics["Agent/goal_std"] = goal.std().item()
 
         return metrics
 

@@ -17,12 +17,15 @@ class MSEDist(Distribution):
         self._dim = dims
         self._axes = tuple([-x for x in range(1, dims + 1)])
         self._agg = agg
+        self.std = 0.1
 
-    def sample(self, sample_shape):
+    def sample(self, sample_shape=None):
         """
         Generates samples by broadcasting the prediction tensor to the desired shape.
         """
-        return self.pred.expand(sample_shape, self.pred.shape)
+        noise = torch.randn_like(self.pred) * self.std
+        return self.pred + noise
+        # return self.pred.expand(sample_shape, self.pred.shape)
 
     def mode(self):
         """

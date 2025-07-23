@@ -299,10 +299,14 @@ def joint_train_world_model_agent(
                         step_counters[i],
                         step=total_steps,
                     )
-                    metrics["replay_buffer/length"] = len(replay_buffer)
+                    # metrics["replay_buffer/length"] = len(replay_buffer)
                     # Reset reward tracker and step counter
                     sum_reward[i] = 0
                     step_counters[i] = 0
+            if isinstance(agent, DirectorAgent):
+                # Reset the carry of the agent
+                # TODO: for multi envs create new reset_carry method that resets carry for each env
+                agent.initiate_carry()
 
         # Update current_obs, current_info and sum_reward
         sum_reward += reward  # [E]
@@ -358,13 +362,13 @@ def joint_train_world_model_agent(
             if agent.__class__.__name__ == "DirectorAgent":
 
                 agent.manager_reward_alpha = linear_decay(
-                    initial=0.01,
-                    final=0.7,
+                    initial=0.7,
+                    final=0.9,
                     step=steps,
                     total_decay_steps=10000,  # config
                 )
                 agent.worker_reward_alpha = linear_decay(
-                    initial=0.01,
+                    initial=0.00,
                     final=0.9,
                     step=steps,
                     total_decay_steps=10000,  # config
