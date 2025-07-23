@@ -440,7 +440,11 @@ class WorldModel(nn.Module):
         sample_size = (self.B, self.L + 1, self.stoch_flattened_dim)
         hidden_size = (self.B, self.L + 1, self.transformer_hidden_dim)
         scalar_size = (self.B, self.L)
-        goal_size = (self.B, self.L + 1, self.stoch_flattened_dim)
+        goal_size = (
+            self.B,
+            self.L + 1,
+            self.stoch_flattened_dim + self.transformer_hidden_dim,
+        )
         skill_size = (self.B, self.L + 1, 8, 8)  # FIXME: makeit a variable
 
         # Initiate buffers with zeros
@@ -546,7 +550,7 @@ class WorldModel(nn.Module):
                     .cpu()
                     .numpy()
                 )
-                goal_log = self.goal_buffer[:: B // 4]
+                goal_log = self.goal_buffer[:: B // 4][:, :, : self.stoch_flattened_dim]
                 # convert goal to env frames
                 goal_log_frames = self.image_decoder(goal_log.to(torch.float32))
                 goal_log_frames = (

@@ -455,10 +455,10 @@ class DirectorAgent(nn.Module):
 
         self.wm_sample_dim = wm_sample_dim
         self.wm_feat_dim = wm_sample_dim + wm_hidden_dim  # WM latent dim
-        self.skill_duration = 8  # config
+        self.skill_duration = 2  # config
         self.skill_shape = (8, 8)  # config
-        self.goal_encoder = GoalEncoder(self.wm_sample_dim, self.skill_shape)
-        self.goal_decoder = GoalDecoder(self.skill_shape, self.wm_sample_dim)
+        self.goal_encoder = GoalEncoder(self.wm_feat_dim, self.skill_shape)
+        self.goal_decoder = GoalDecoder(self.skill_shape, self.wm_feat_dim)
         self.reward_scale_decay = True  # config
         self.manager_reward_alpha = 0.1  # config
         self.manager = BaseAgent(
@@ -488,7 +488,7 @@ class DirectorAgent(nn.Module):
                     "scale": (1 - self.manager_reward_alpha),
                 },
             },
-            input_dim=self.wm_feat_dim + self.wm_sample_dim,  # goal_dim = wm_sample_dim
+            input_dim=self.wm_feat_dim + self.wm_feat_dim,  # goal_dim = wm_feat_dim
             action_dim=wm_action_dim,
             actor_dist="Categorical",
         )
@@ -534,7 +534,9 @@ class DirectorAgent(nn.Module):
         """
         self.carry = defaultdict(str)
         self.carry["step"] = 0
-        self.carry["goal"] = torch.zeros(1, 1, self.wm_sample_dim).to(DEVICE)
+        self.carry["goal"] = torch.zeros(1, 1, self.wm_feat_dim).to(
+            DEVICE
+        )  # FIXME: wm_sample_dim
         self.carry["skill"] = torch.zeros(1, 1, *self.skill_shape).to(DEVICE)
 
     @torch.no_grad()
@@ -553,13 +555,16 @@ class DirectorAgent(nn.Module):
         Used by the manager.
         """
         wm_sample = imagine_rollout["sample"]  # [B, L, Z]
+        wm_hidden = imagine_rollout["hidden"]  # [B, L, D]
+        latent = torch.cat((wm_sample, wm_hidden), dim=-1)  # [B, L, 2*]
         # Get encoded distribution
-        encoded_dist = self.goal_encoder(wm_sample)
+        encoded_dist = self.goal_encoder(latent)  # FIXME: wm_sample
+
         # Get decoded distribution
         decoded_dist = self.goal_decoder(encoded_dist.sample())
         # Compute ELBO reward: MSE bteween decoded and actual
         # the OP shape: [B, L]
-        reward = ((decoded_dist.mode() - wm_sample) ** 2).mean(-1)
+        reward = ((decoded_dist.mode() - latent) ** 2).mean(-1)
         # return second element onwards [B, L-1]
         # Becuase usually sample and hidden has one exra element in the initail point
         # So for sample L=17 when imagine_rollout is 16 steps long
@@ -573,13 +578,18 @@ class DirectorAgent(nn.Module):
         Used by the worker.
         """
         wm_sample = imagine_rollout["sample"]
+        wm_hidden = imagine_rollout["hidden"]  # [B, L, D]
+        latent = torch.cat((wm_sample, wm_hidden), dim=-1)  # [B, L, 2*]
+
         goal = self.carry["goal"]
         # calculate normilization factor
         norm = torch.maximum(
-            goal.norm(dim=-1, keepdim=True), wm_sample.norm(dim=-1, keepdim=True)
-        ).clamp_min(1e-12)
+            goal.norm(dim=-1, keepdim=True), latent.norm(dim=-1, keepdim=True)
+        ).clamp_min(
+            1e-12
+        )  # FIXME: wm_sample
         # [B, L, Z] -> [B, L]
-        reward = (goal / norm * wm_sample / norm).sum(dim=-1)
+        reward = (goal / norm * latent / norm).sum(dim=-1)  # FIXME: wm_sample
         # return the second element onward [B, L-1]
         # Becuase usually sample and hidden has one exra element in the initail point
         # so for sample L=17 when imagine_rollout is 16 steps long
@@ -747,16 +757,18 @@ class DirectorAgent(nn.Module):
             device_type=DEVICE.type, dtype=DTYPE_16, enabled=self.use_amp
         ):
             wm_sample = imagine_rollout["sample"]  # [B, L, Z]
+            wm_hidden = imagine_rollout["hidden"]  # [B, L, D]
+            latent = torch.cat((wm_sample, wm_hidden), dim=-1)
 
             # --- Forward pass ---
             # Get encoded distribution
-            encoded_dist = self.goal_encoder(wm_sample)  # q(z|x)
+            encoded_dist = self.goal_encoder(latent)  # q(z|x)
             skill_sample = encoded_dist.sample()
             # Get decoded distribution
             decoded_dist = self.goal_decoder(skill_sample)  # p(x|z)
             # Reconstruction loss (negative log-likelihood)
             # [B, L] -> [B]
-            recon_loss = decoded_dist.log_prob(wm_sample.detach()).mean(
+            recon_loss = decoded_dist.log_prob(latent.detach()).mean(
                 -1
             )  # FIXME: Negative removed as the MSEDist just returns the MSE()
             # KL divergence
@@ -857,11 +869,12 @@ class DirectorAgent(nn.Module):
         traj = deepcopy(imagine_rollout)
         # for manager the action is the skill
         traj["action"] = traj.pop("skill")  # Replace "skill" with "action"
+        traj.pop("goal")
         # also pop the world model reward as its present as extr_reward
         traj.pop("reward")
         # remove the goal from the manager's trajectory; its not used in actor critics
-        traj.pop("goal")
         traj["cont"] = 1 - traj["termination"]  # [0,0,0,1] -> [1,1,1,0] ->  # [B, L]
+        traj.pop("termination")
         for key, value in traj.items():
             # For the manager the reward is the mean of the rewards in the skill duration
             if "reward" in key:  # [reward_extr, reward_expl, reward_goal]
@@ -872,8 +885,9 @@ class DirectorAgent(nn.Module):
                 # [B, L, *] -> [B, N, L, *] -> [B, N, *]
                 traj[key] = self.rehsape_traj(value * weights).mean(dim=2)
 
-            elif key in ["cont", "termination"]:
+            elif key in ["cont"]:
                 traj[key] = self.rehsape_traj(value).prod(dim=2)  # [B, L] -> [B, N]
+                # this logic only works for cont and not for termination
 
             elif key in ["hidden", "sample"]:
                 # take the first one from every K
@@ -888,6 +902,7 @@ class DirectorAgent(nn.Module):
                 # take the first one from every K
                 traj[key] = self.rehsape_traj(value)[:, :, 0, :]  # [B, N, Z]
 
+        traj["termination"] = 1 - traj["cont"]  # [B, N]
         # Compute trajectory weights
         traj["weight"] = (
             torch.cumprod(self.discount * traj["cont"], dim=1) / self.discount
