@@ -158,3 +158,4 @@ ckpt/
 runs/
 eval_result/
 wandb/
+exps/frames/

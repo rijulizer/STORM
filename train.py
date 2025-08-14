@@ -52,26 +52,6 @@ def build_single_env(env_name: str, image_size: int, env_observablity: str = "Fu
     return env
 
 
-# def build_single_env(
-#     env_name: str, image_size: int, env_observablity=None, seed: int = 1
-# ):
-#     """
-#     Build a single env with wrappers and preprocesses env.
-#     """
-#     env = gymnasium.make(
-#         env_name, full_action_space=False, render_mode="rgb_array", frameskip=1
-#     )
-#     # Convert int to tuple as gymnasium.wrappers.ResizeObservation requires tuple
-#     if isinstance(image_size, int):
-#         image_size = (image_size, image_size)
-#     env = env_wrapper.SeedEnvWrapper(env, seed=seed)
-#     env = env_wrapper.MaxLast2FrameSkipWrapper(env, skip=4)
-#     env = gymnasium.wrappers.ResizeObservation(env, shape=image_size)
-#     env = env_wrapper.LifeLossInfo(env)
-
-#     return env
-
-
 def build_vec_env(env_names: list[str], image_size: int, env_observablity):
     """
     Build a vectorized env with n=num_envs parallel envs.
@@ -103,22 +83,22 @@ def build_agent(conf, action_dim: int):
     Return an agent with the specified configuration
     """
     ## ActorCriticAgent
-    # return ActorCriticAgent(
-    #     feat_dim=32 * 32 + conf.Models.WorldModel.TransformerHiddenDim,
-    #     num_layers=conf.Models.Agent.NumLayers,
-    #     hidden_dim=conf.Models.Agent.HiddenDim,
-    #     action_dim=action_dim,
-    #     gamma=conf.Models.Agent.Gamma,
-    #     lambd=conf.Models.Agent.Lambda,
-    #     entropy_coef=conf.Models.Agent.EntropyCoef,
-    # ).to(DEVICE)
+    return ActorCriticAgent(
+        feat_dim=32 * 32 + conf.Models.WorldModel.TransformerHiddenDim,
+        num_layers=conf.Models.Agent.NumLayers,
+        hidden_dim=conf.Models.Agent.HiddenDim,
+        action_dim=action_dim,
+        gamma=conf.Models.Agent.Gamma,
+        lambd=conf.Models.Agent.Lambda,
+        entropy_coef=conf.Models.Agent.EntropyCoef,
+    ).to(DEVICE)
 
     # DirectorAgent
-    return DirectorAgent(
-        conf.Models.WorldModel.TransformerHiddenDim,
-        32 * 32,  # faltten sample dim
-        action_dim,
-    ).to(DEVICE)
+    # return DirectorAgent(
+    #     conf.Models.WorldModel.TransformerHiddenDim,
+    #     32 * 32,  # faltten sample dim
+    #     action_dim,
+    # ).to(DEVICE)
 
 
 def train_world_model(
@@ -152,7 +132,7 @@ def train_world_model(
 def world_model_imagine_data(
     replay_buffer: ReplayBuffer,
     world_model: WorldModel,
-    agent: DirectorAgent,  # ActorCriticAgent,
+    agent: ActorCriticAgent,  # ActorCriticAgent,
     imagine_batch_size,
     imagine_demonstration_batch_size,
     imagine_context_length,
@@ -196,7 +176,7 @@ def joint_train_world_model_agent(
     image_size: int,
     replay_buffer: ReplayBuffer,
     world_model: WorldModel,
-    agent: DirectorAgent,  # ActorCriticAgent,
+    agent: ActorCriticAgent,  # ActorCriticAgent,
     train_dynamics_every_steps,
     train_agent_every_steps,
     batch_size,
@@ -367,12 +347,13 @@ def joint_train_world_model_agent(
                     step=steps,
                     total_decay_steps=10000,  # config
                 )
-                agent.worker_reward_alpha = linear_decay(
-                    initial=0.00,
-                    final=0.9,
-                    step=steps,
-                    total_decay_steps=10000,  # config
-                )
+                # agent.worker_reward_alpha = linear_decay(
+                #     initial=0.00,
+                #     final=0.9,
+                #     step=steps,
+                #     total_decay_steps=10000,  # config
+                # )
+                agent.worker_reward_alpha = 0.0  # FIXME Goal agnostic
                 steps += 1
             agent_metrics = agent.update(imagine_rollout)
             # update metrics

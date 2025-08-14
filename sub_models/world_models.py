@@ -461,7 +461,7 @@ class WorldModel(nn.Module):
 
     def imagine_data(
         self,
-        agent: DirectorAgent,  # ActorCriticAgent,
+        agent: ActorCriticAgent,  # ActorCriticAgent,
         buffer_sample,
         imagine_batch_size,
         imagine_batch_length,

@@ -83,17 +83,17 @@ class RunParams:
         print(colorama.Fore.GREEN + "-----------------" + colorama.Style.RESET_ALL)
 
 
-def main():
-    env_names = [
-        "MiniGrid-Empty-8x8-v0",
-        "MiniGrid-SimpleCrossingS9N1-v0",
-        "MiniGrid-FourRooms-v0",
-        "MiniGrid-MemoryS11-v0",
-        ## "ALE/MsPacman-v5",
-        ## "MiniGrid-Empty-Random-6x6-v0",
-        # "MiniGrid-Empty-5x5-v0",
-    ]
-    run_params = RunParams(env_names, exp_name="MultiEnv-FullObs-TEM-v2")
+def main(
+    exp_name,
+    env_names,
+    ckpt_root,
+    model_step,
+    buffer_warmup_length,
+    max_steps,
+    save_every_steps,
+    log_video_steps,
+):
+    run_params = RunParams(env_names, exp_name)
     # set seed
     seed_np_torch(seed=run_params.seed)
     # copy config file
@@ -116,6 +116,14 @@ def main():
     print(
         f"World model transformer: {world_model.storm_transformer.__class__.__name__}"
     )
+    # load checkpointed model weights
+    print(f"Loading model weights from {ckpt_root} at step {model_step}")
+    world_model.load_state_dict(
+        torch.load(f"{ckpt_root}/world_model_{model_step}.pth", map_location=DEVICE)
+    )
+    agent.load_state_dict(
+        torch.load(f"{ckpt_root}/agent_{model_step}.pth", map_location=DEVICE)
+    )
     # Log the number of parameters for both models
     world_model_params = sum(
         p.numel() for p in world_model.parameters() if p.requires_grad
@@ -131,7 +139,7 @@ def main():
         ),
         num_envs=len(run_params.env_names),
         max_length=run_params.conf.JointTrainAgent.BufferMaxLength,
-        warmup_length=run_params.conf.JointTrainAgent.BufferWarmUp,
+        warmup_length=buffer_warmup_length,
         store_on_gpu=run_params.conf.BasicSettings.ReplayBufferOnGPU,
     )
     # judge whether to load demonstration trajectory
@@ -167,7 +175,7 @@ def main():
         joint_train_world_model_agent(
             env_names=run_params.env_names,
             num_envs=len(run_params.env_names),
-            max_steps=run_params.conf.JointTrainAgent.SampleMaxSteps,
+            max_steps=max_steps,
             env_observablity=run_params.conf.BasicSettings.EnvObservability,
             image_size=run_params.conf.BasicSettings.ImageSize,
             replay_buffer=replay_buffer,
@@ -190,8 +198,8 @@ def main():
             ),
             imagine_context_length=run_params.conf.JointTrainAgent.ImagineContextLength,
             imagine_batch_length=run_params.conf.JointTrainAgent.ImagineBatchLength,
-            save_every_steps=run_params.conf.JointTrainAgent.SaveEverySteps,
-            log_video_steps=run_params.conf.JointTrainAgent.LogVideoSteps,
+            save_every_steps=save_every_steps,
+            log_video_steps=log_video_steps,
             seed=run_params.seed,
             logger=logger,
             args=run_params,
@@ -199,4 +207,28 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    exp_name = "MapInversion-Empty-Baseline-v1"
+    env_names = [
+        "MiniGrid-Empty-8x8-v0",
+        "MiniGrid-Empty-8x8-CRG-O1",
+        "MiniGrid-Empty-8x8-CRG-O2",
+        "MiniGrid-Empty-8x8-CRG-O3",
+    ]
+    # load checkpointed model weights from this chkpt
+    ckpt_root = f"./ckpt/MultiEnvFullObs-Baseline_v1/"
+    model_step = 60000
+    buffer_warmup_length = 1000
+    max_steps = 5000
+    save_every_steps = 1000
+    log_video_steps = 1000
+
+    main(
+        exp_name,
+        env_names,
+        ckpt_root,
+        model_step,
+        buffer_warmup_length,
+        max_steps,
+        save_every_steps,
+        log_video_steps,
+    )
